@@ -75,7 +75,7 @@ func flagv(a, name, dflt) (v) {
 func resolve(db, q) (id) {
     id = ""
     like := "%" + q + "%"
-    rows := sqlite_query(db, "SELECT id, name, company, email, phone, source, stage, next_action, next_due, created, updated FROM contacts WHERE id=? OR email=? OR name LIKE ? OR company LIKE ? ORDER BY updated DESC LIMIT 1", []string{q, q, like, like})
+    rows := sqlite_query(db, "SELECT id, name, company, email, phone, source, stage, next_action, next_due, created, updated FROM contacts WHERE id=? OR email=? OR phone=? OR name LIKE ? OR company LIKE ? ORDER BY updated DESC LIMIT 1", []string{q, q, q, like, like})
     cs := parse(rows, []Contact{})
     if len(cs) > 0 { id = cs[0].id }
 }
@@ -109,13 +109,20 @@ func cmd_add(db, a) {
         if len(cs) > 0 { id = cs[0].id }
     }
     if id == "" {
+        if phone != "" {
+            prows := sqlite_query(db, "SELECT id, name, company, email, phone, source, stage, next_action, next_due, created, updated FROM contacts WHERE phone=? LIMIT 1", []string{phone})
+            ps := parse(prows, []Contact{})
+            if len(ps) > 0 { id = ps[0].id }
+        }
+    }
+    if id == "" {
         id = nid()
         sqlite_exec(db, "INSERT INTO contacts(id,name,company,email,phone,source,stage,created,updated) VALUES(?,?,?,?,?,?,?,?,?)", []string{id, name, company, email, phone, source, stage, str(n), str(n)})
         sqlite_close(db)
         say("{\"ok\":true,\"created\":true,\"id\":\"" + id + "\",\"name\":\"" + esc(name) + "\"}")
         return
     }
-    sqlite_exec(db, "UPDATE contacts SET name=?, company=COALESCE(NULLIF(?,''),company), phone=COALESCE(NULLIF(?,''),phone), source=COALESCE(NULLIF(?,''),source), updated=? WHERE id=?", []string{name, company, phone, source, str(n), id})
+    sqlite_exec(db, "UPDATE contacts SET name=?, company=COALESCE(NULLIF(?,''),company), email=COALESCE(NULLIF(?,''),email), phone=COALESCE(NULLIF(?,''),phone), source=COALESCE(NULLIF(?,''),source), updated=? WHERE id=?", []string{name, company, email, phone, source, str(n), id})
     sqlite_close(db)
     say("{\"ok\":true,\"created\":false,\"id\":\"" + id + "\",\"name\":\"" + esc(name) + "\"}")
 }
