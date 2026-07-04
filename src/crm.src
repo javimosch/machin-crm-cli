@@ -229,8 +229,126 @@ func cmd_ingest(db, a) {
     say("{\"ok\":true,\"ingested\":" + str(len(items)) + ",\"added\":" + str(added) + "}")
 }
 
+// ---- webhook server (crm serve) : the Resend sink -------------------------
+
+func unq(s) (o) {
+    o = s
+    n := len(s)
+    if n >= 2 {
+        if substr(s, 0, 1) == "\"" { o = substr(s, 1, n - 1) }
+    }
+}
+
+func jget(body, path) (v) {
+    raw, err := json_get(body, path)
+    v = ""
+    if err == "" { v = unq(raw) }
+}
+
+// verify_svix — Resend signs webhooks with Svix. secret is "whsec_<base64>"; the signed
+// content is "<svix-id>.<svix-timestamp>.<body>", HMAC-SHA256, base64. Header svix-signature
+// is space-separated "v1,<sig>" tokens. Returns 1 if any matches.
+func verify_svix(req, secret) (ok) {
+    ok = 0
+    sid := header(req, "svix-id")
+    sts := header(req, "svix-timestamp")
+    ssig := header(req, "svix-signature")
+    if sid == "" || sts == "" || ssig == "" { return ok }
+    b64 := secret
+    if has_prefix(secret, "whsec_") { b64 = substr(secret, 6, len(secret)) }
+    key := base64_decode_bytes(b64)
+    mac := hmac_sha256_bytes(key, bytes(sid + "." + sts + "." + req.body))
+    expected := base64_encode_bytes(mac)
+    parts := split(ssig, " ")
+    i := 0
+    for i < len(parts) {
+        p := parts[i]
+        ci := index(p, ",")
+        if ci >= 0 {
+            if substr(p, ci + 1, len(p)) == expected { ok = 1; return ok }
+        }
+        i = i + 1
+    }
+}
+
+// upsert a minimal contact by email, return its id
+func wh_contact(db, email, name) (id) {
+    id = ""
+    if email == "" { return id }
+    rows := sqlite_query(db, "SELECT id, name, company, email, phone, source, stage, next_action, next_due, created, updated FROM contacts WHERE email=? LIMIT 1", []string{email})
+    cs := parse(rows, []Contact{})
+    if len(cs) > 0 { id = cs[0].id; return id }
+    id = nid()
+    n := now()
+    sqlite_exec(db, "INSERT INTO contacts(id,name,email,source,stage,created,updated) VALUES(?,?,?,?,?,?,?)", []string{id, name, email, "resend", "contacted", str(n), str(n)})
+}
+
+func wh_event(db, cid, summary, ref) {
+    sqlite_exec(db, "INSERT INTO events(id,contact_id,channel,direction,summary,ref,ts) VALUES(?,?,?,?,?,?,?)", []string{nid(), cid, "email", "in", summary, ref, str(now())})
+    sqlite_exec(db, "UPDATE contacts SET updated=? WHERE id=?", []string{str(now()), cid})
+}
+
+func wh_stage(db, cid, stage) {
+    sqlite_exec(db, "UPDATE contacts SET stage=?, updated=? WHERE id=?", []string{stage, str(now()), cid})
+}
+
+// POST /resend — a Resend webhook. Outbound events (opened/bounced/complained) act on
+// data.to[0]; inbound replies (email.received / inbound.email) act on data.from.
+func h_resend(req) (res) {
+    secret := env("RESEND_WEBHOOK_SECRET")
+    if secret != "" {
+        if verify_svix(req, secret) == 0 { return response("401 Unauthorized", "application/json", "{\"ok\":false,\"error\":\"bad signature\"}") }
+    }
+    body := req.body
+    etype := jget(body, ".type")
+    ref := jget(body, ".data.email_id")
+    to := jget(body, ".data.to[0]")
+    if to == "" { to = jget(body, ".data.to") }
+    db := opendb()
+    handled := "ignored:" + etype
+    done := 0
+    if etype == "email.bounced" {
+        cid := wh_contact(db, to, to)
+        if cid != "" { wh_event(db, cid, "bounced — address invalid", ref); wh_stage(db, cid, "lost") }
+        handled = "bounced"; done = 1
+    }
+    if done == 0 && etype == "email.complained" {
+        cid := wh_contact(db, to, to)
+        if cid != "" { wh_event(db, cid, "spam complaint — suppress", ref); wh_stage(db, cid, "lost") }
+        handled = "complained"; done = 1
+    }
+    if done == 0 && etype == "email.opened" {
+        cid := wh_contact(db, to, to)
+        if cid != "" { wh_event(db, cid, "opened the email", ref) }
+        handled = "opened"; done = 1
+    }
+    if done == 0 && etype == "email.delivered" { handled = "delivered"; done = 1 }
+    if done == 0 {
+        if etype == "email.received" || etype == "inbound.email" || etype == "email.inbound" {
+            from := jget(body, ".data.from")
+            subj := jget(body, ".data.subject")
+            cid := wh_contact(db, from, from)
+            if cid != "" { wh_event(db, cid, "REPLY — " + subj, ref); wh_stage(db, cid, "replied") }
+            handled = "reply"; done = 1
+        }
+    }
+    sqlite_close(db)
+    res = ok_json("{\"ok\":true,\"handled\":\"" + esc(handled) + "\"}")
+}
+
+func cmd_serve(a) {
+    port := 8790
+    if len(a) >= 3 { port = parse_int(a[2]) }
+    say("{\"ok\":true,\"serving\":\"crm-cli webhook\",\"port\":" + str(port) + ",\"routes\":[\"POST /resend\",\"GET /_health\"]}")
+    serve(port, func(req) {
+        if req.path == "/_health" { return ok_json("{\"ok\":true}") }
+        if req.method == "POST" && has_prefix(req.path, "/resend") { return h_resend(req) }
+        return not_found()
+    })
+}
+
 func cmd_help() {
-    say("{\"ok\":true,\"name\":\"crm-cli\",\"tagline\":\"the agent-first CRM — sink for the outreach machine\",\"db\":\"$CRM_DB or ~/.crm-cli.db\",\"commands\":{\"add\":\"add <name> [--company --email --phone --source --stage]\",\"log\":\"log <contact> <channel> <summary> [--ref --direction]\",\"stage\":\"stage <contact> <new|contacted|replied|meeting|deal|won|lost>\",\"next\":\"next <contact> <action> [--due YYYY-MM-DD|+N days]\",\"show\":\"show <contact>\",\"list\":\"list [--stage X]\",\"due\":\"due (next steps due today/overdue)\",\"pipeline\":\"pipeline (counts by stage)\",\"ingest\":\"ingest '<json>' (bulk from grepapi leads)\"}}")
+    say("{\"ok\":true,\"name\":\"crm-cli\",\"tagline\":\"the agent-first CRM — sink for the outreach machine\",\"db\":\"$CRM_DB or ~/.crm-cli.db\",\"commands\":{\"add\":\"add <name> [--company --email --phone --source --stage]\",\"log\":\"log <contact> <channel> <summary> [--ref --direction]\",\"stage\":\"stage <contact> <new|contacted|replied|meeting|deal|won|lost>\",\"next\":\"next <contact> <action> [--due YYYY-MM-DD|+N days]\",\"show\":\"show <contact>\",\"list\":\"list [--stage X]\",\"due\":\"due (next steps due today/overdue)\",\"pipeline\":\"pipeline (counts by stage)\",\"ingest\":\"ingest '<json>' (bulk from grepapi leads)\",\"serve\":\"serve [port] (Resend webhook sink: opens/bounces/complaints/replies -> the CRM)\"}}")
 }
 
 func main() {
@@ -238,6 +356,7 @@ func main() {
     cmd := ""
     if len(a) >= 2 { cmd = a[1] }
     if cmd == "" || cmd == "help" { cmd_help(); return }
+    if cmd == "serve" { cmd_serve(a); return }
     db := opendb()
     if cmd == "add" { cmd_add(db, a); return }
     if cmd == "log" { cmd_log(db, a); return }
