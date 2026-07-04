@@ -1,9 +1,10 @@
 # crm-cli — the agent-first CRM
 
-A local-first, single-binary CRM (MFL/machin over SQLite). It is the **sink** for the
-outreach machine ([grepapi](../grepapi) / bland / resend): every contact and every touch
-lands here as **two tables — contacts + their event timeline**. The primary user is an
-**agent**: JSON on stdout, structured errors on stderr, semantic exit codes, no UI tax.
+A local-first, single-binary CRM (MFL/[machin](https://github.com/javimosch/machin) over
+SQLite). It is the **sink** for an outreach machine (any lead-gen / calling / email tool):
+every contact and every touch lands here as **two tables — contacts + their event
+timeline**. The primary user is an **agent**: JSON on stdout, structured errors on stderr,
+semantic exit codes, no UI tax.
 
 ## Why
 Every CRM dies of stale data because humans won't do data entry. This one is written to be
@@ -28,6 +29,8 @@ crm ingest '<json>'           # bulk upsert from grepapi leads (the sink)
 `<contact>` resolves by id, exact email, or a name/company substring. DB at `$CRM_DB`
 (default `~/.crm-cli.db`).
 
-## Pairs with grepapi
-grepapi owns **top-of-funnel leads**; crm-cli owns **post-engagement relationships**. The
-handoff is *"they engaged."* The `grepapi-call` / `grepapi-email` glue logs each touch here.
+## Pairs with a lead engine
+Your lead engine owns **top-of-funnel leads**; crm-cli owns **post-engagement
+relationships**. The handoff is *"they engaged."* Have your calling / email glue shell out to
+`crm add` + `crm log` after each touch — the CRM then self-populates with zero data entry.
+(Built to pair with [machin](https://github.com/javimosch/machin)-based outreach tools.)
