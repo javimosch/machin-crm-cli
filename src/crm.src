@@ -1,0 +1,247 @@
+// crm-cli — a local-first, agent-first CRM. One MFL/machin static binary over SQLite.
+// It is the SINK for the outreach machine ([[grepapi]] / bland / resend): every contact and
+// every touch (call, email, note, reply) lands here as two tables — contacts + their event
+// timeline. Primary user = an agent: JSON on stdout, structured errors on stderr, semantic
+// exit codes. DB at $CRM_DB (default ~/.crm-cli.db).
+
+type Contact struct {
+    id string
+    name string
+    company string
+    email string
+    phone string
+    source string
+    stage string
+    next_action string
+    next_due string
+    created int
+    updated int
+}
+
+type Event struct {
+    id string
+    contact_id string
+    channel string
+    direction string
+    summary string
+    ref string
+    ts int
+}
+
+type Duerow struct { d string }
+
+func dbpath() (p) {
+    p = env("CRM_DB")
+    if p == "" { p = env("HOME") + "/.crm-cli.db" }
+}
+
+func opendb() (db) {
+    db = sqlite_open(dbpath())
+    sqlite_exec(db, "PRAGMA busy_timeout=3000", []string{})
+    sqlite_exec(db, "CREATE TABLE IF NOT EXISTS contacts(id TEXT PRIMARY KEY, name TEXT, company TEXT, email TEXT, phone TEXT, source TEXT, stage TEXT DEFAULT 'new', next_action TEXT DEFAULT '', next_due TEXT DEFAULT '', created INTEGER, updated INTEGER)", []string{})
+    sqlite_exec(db, "CREATE TABLE IF NOT EXISTS events(id TEXT PRIMARY KEY, contact_id TEXT, channel TEXT, direction TEXT, summary TEXT, ref TEXT, ts INTEGER)", []string{})
+}
+
+func nid() (s) { s = to_hex(rand_bytes(8)) }
+
+func esc(s) (o) {
+    o = replace(s, "\\", "\\\\")
+    o = replace(o, "\"", "\\\"")
+    o = replace(o, "\n", "\\n")
+    o = replace(o, "\r", "\\r")
+    o = replace(o, "\t", "\\t")
+}
+
+func say(s) { write(1, s + "\n") }
+
+func die(code, msg) {
+    write(2, "{\"ok\":false,\"error\":\"" + esc(msg) + "\"}\n")
+    exit(code)
+}
+
+// flag value: scan args for "--name <value>"
+func flagv(a, name, dflt) (v) {
+    v = dflt
+    i := 0
+    for i < len(a) {
+        if a[i] == name {
+            if i + 1 < len(a) { v = a[i+1] }
+        }
+        i = i + 1
+    }
+}
+
+// resolve a contact by id, exact email, or a name/company substring (most-recent wins)
+func resolve(db, q) (id) {
+    id = ""
+    like := "%" + q + "%"
+    rows := sqlite_query(db, "SELECT id, name, company, email, phone, source, stage, next_action, next_due, created, updated FROM contacts WHERE id=? OR email=? OR name LIKE ? OR company LIKE ? ORDER BY updated DESC LIMIT 1", []string{q, q, like, like})
+    cs := parse(rows, []Contact{})
+    if len(cs) > 0 { id = cs[0].id }
+}
+
+// resolve a due token: a SQLite modifier like "+4 days" -> an absolute date; else pass through
+func resolve_due(db, due) (d) {
+    d = due
+    if due == "" { return d }
+    if has_prefix(due, "+") || has_prefix(due, "-") {
+        rows := sqlite_query(db, "SELECT date('now', ?) AS d", []string{due})
+        rs := parse(rows, []Duerow{})
+        if len(rs) > 0 { d = rs[0].d }
+    }
+}
+
+// crm add <name> [--company --email --phone --source --stage]  -> upsert by email
+func cmd_add(db, a) {
+    name := ""
+    if len(a) >= 3 { name = a[2] }
+    if name == "" { die(80, "usage: crm add <name> [--company X --email X --phone X --source X --stage X]") }
+    email := flagv(a, "--email", "")
+    company := flagv(a, "--company", "")
+    phone := flagv(a, "--phone", "")
+    source := flagv(a, "--source", "")
+    stage := flagv(a, "--stage", "new")
+    n := now()
+    id := ""
+    if email != "" {
+        rows := sqlite_query(db, "SELECT id, name, company, email, phone, source, stage, next_action, next_due, created, updated FROM contacts WHERE email=? LIMIT 1", []string{email})
+        cs := parse(rows, []Contact{})
+        if len(cs) > 0 { id = cs[0].id }
+    }
+    if id == "" {
+        id = nid()
+        sqlite_exec(db, "INSERT INTO contacts(id,name,company,email,phone,source,stage,created,updated) VALUES(?,?,?,?,?,?,?,?,?)", []string{id, name, company, email, phone, source, stage, str(n), str(n)})
+        sqlite_close(db)
+        say("{\"ok\":true,\"created\":true,\"id\":\"" + id + "\",\"name\":\"" + esc(name) + "\"}")
+        return
+    }
+    sqlite_exec(db, "UPDATE contacts SET name=?, company=COALESCE(NULLIF(?,''),company), phone=COALESCE(NULLIF(?,''),phone), source=COALESCE(NULLIF(?,''),source), updated=? WHERE id=?", []string{name, company, phone, source, str(n), id})
+    sqlite_close(db)
+    say("{\"ok\":true,\"created\":false,\"id\":\"" + id + "\",\"name\":\"" + esc(name) + "\"}")
+}
+
+// crm log <contact> <channel> <summary> [--ref <id>] [--direction in|out]
+func cmd_log(db, a) {
+    if len(a) < 5 { die(80, "usage: crm log <contact> <channel> <summary> [--ref X] [--direction in|out]") }
+    cid := resolve(db, a[2])
+    if cid == "" { die(90, "no contact matching: " + a[2]) }
+    ref := flagv(a, "--ref", "")
+    dir := flagv(a, "--direction", "out")
+    eid := nid()
+    sqlite_exec(db, "INSERT INTO events(id,contact_id,channel,direction,summary,ref,ts) VALUES(?,?,?,?,?,?,?)", []string{eid, cid, a[3], dir, a[4], ref, str(now())})
+    sqlite_exec(db, "UPDATE contacts SET updated=? WHERE id=?", []string{str(now()), cid})
+    sqlite_exec(db, "UPDATE contacts SET stage='contacted' WHERE id=? AND stage='new'", []string{cid})
+    sqlite_close(db)
+    say("{\"ok\":true,\"event\":\"" + eid + "\",\"contact\":\"" + cid + "\",\"channel\":\"" + esc(a[3]) + "\"}")
+}
+
+// crm stage <contact> <stage>
+func cmd_stage(db, a) {
+    if len(a) < 4 { die(80, "usage: crm stage <contact> <new|contacted|replied|meeting|deal|won|lost>") }
+    cid := resolve(db, a[2])
+    if cid == "" { die(90, "no contact matching: " + a[2]) }
+    sqlite_exec(db, "UPDATE contacts SET stage=?, updated=? WHERE id=?", []string{a[3], str(now()), cid})
+    sqlite_close(db)
+    say("{\"ok\":true,\"contact\":\"" + cid + "\",\"stage\":\"" + esc(a[3]) + "\"}")
+}
+
+// crm next <contact> <action> [--due <YYYY-MM-DD | +N days>]
+func cmd_next(db, a) {
+    if len(a) < 4 { die(80, "usage: crm next <contact> <action> [--due 2026-07-08 | --due \"+4 days\"]") }
+    cid := resolve(db, a[2])
+    if cid == "" { die(90, "no contact matching: " + a[2]) }
+    due := resolve_due(db, flagv(a, "--due", ""))
+    sqlite_exec(db, "UPDATE contacts SET next_action=?, next_due=?, updated=? WHERE id=?", []string{a[3], due, str(now()), cid})
+    sqlite_close(db)
+    say("{\"ok\":true,\"contact\":\"" + cid + "\",\"next_action\":\"" + esc(a[3]) + "\",\"next_due\":\"" + esc(due) + "\"}")
+}
+
+// crm show <contact>  -> the contact + its full event timeline
+func cmd_show(db, a) {
+    if len(a) < 3 { die(80, "usage: crm show <contact>") }
+    cid := resolve(db, a[2])
+    if cid == "" { die(90, "no contact matching: " + a[2]) }
+    c := sqlite_query(db, "SELECT id, name, company, email, phone, source, stage, next_action, next_due, created, updated FROM contacts WHERE id=?", []string{cid})
+    ev := sqlite_query(db, "SELECT id, channel, direction, summary, ref, ts FROM events WHERE contact_id=? ORDER BY ts ASC", []string{cid})
+    sqlite_close(db)
+    say("{\"ok\":true,\"contact\":" + c + ",\"timeline\":" + ev + "}")
+}
+
+// crm list [--stage X]
+func cmd_list(db, a) {
+    stage := flagv(a, "--stage", "")
+    rows := ""
+    if stage == "" {
+        rows = sqlite_query(db, "SELECT id, name, company, email, stage, next_action, next_due FROM contacts ORDER BY updated DESC LIMIT 500", []string{})
+    } else {
+        rows = sqlite_query(db, "SELECT id, name, company, email, stage, next_action, next_due FROM contacts WHERE stage=? ORDER BY updated DESC LIMIT 500", []string{stage})
+    }
+    sqlite_close(db)
+    say("{\"ok\":true,\"contacts\":" + rows + "}")
+}
+
+// crm due  -> contacts whose next step is due today or overdue (the "what's next" view)
+func cmd_due(db) {
+    rows := sqlite_query(db, "SELECT id, name, company, stage, next_action, next_due FROM contacts WHERE next_due != '' AND next_due <= date('now') ORDER BY next_due ASC", []string{})
+    sqlite_close(db)
+    say("{\"ok\":true,\"due\":" + rows + "}")
+}
+
+// crm pipeline  -> the board: counts by stage
+func cmd_pipeline(db) {
+    rows := sqlite_query(db, "SELECT stage, COUNT(*) AS n FROM contacts GROUP BY stage ORDER BY n DESC", []string{})
+    sqlite_close(db)
+    say("{\"ok\":true,\"pipeline\":" + rows + "}")
+}
+
+// crm ingest '<json-array>'  -> bulk upsert contacts from grepapi leads (the sink entrypoint).
+// Each item: {name, company, email, phone, source, stage}. Upserts by email when present.
+func cmd_ingest(db, a) {
+    if len(a) < 3 { die(80, "usage: crm ingest '<json array of {name,company,email,phone,source,stage}>'") }
+    items := parse(a[2], []Contact{})
+    n := now()
+    added := 0
+    i := 0
+    for i < len(items) {
+        it := items[i]
+        st := it.stage
+        if st == "" { st = "new" }
+        id := ""
+        if it.email != "" {
+            rows := sqlite_query(db, "SELECT id, name, company, email, phone, source, stage, next_action, next_due, created, updated FROM contacts WHERE email=? LIMIT 1", []string{it.email})
+            cs := parse(rows, []Contact{})
+            if len(cs) > 0 { id = cs[0].id }
+        }
+        if id == "" {
+            sqlite_exec(db, "INSERT INTO contacts(id,name,company,email,phone,source,stage,created,updated) VALUES(?,?,?,?,?,?,?,?,?)", []string{nid(), it.name, it.company, it.email, it.phone, it.source, st, str(n), str(n)})
+            added = added + 1
+        }
+        i = i + 1
+    }
+    sqlite_close(db)
+    say("{\"ok\":true,\"ingested\":" + str(len(items)) + ",\"added\":" + str(added) + "}")
+}
+
+func cmd_help() {
+    say("{\"ok\":true,\"name\":\"crm-cli\",\"tagline\":\"the agent-first CRM — sink for the outreach machine\",\"db\":\"$CRM_DB or ~/.crm-cli.db\",\"commands\":{\"add\":\"add <name> [--company --email --phone --source --stage]\",\"log\":\"log <contact> <channel> <summary> [--ref --direction]\",\"stage\":\"stage <contact> <new|contacted|replied|meeting|deal|won|lost>\",\"next\":\"next <contact> <action> [--due YYYY-MM-DD|+N days]\",\"show\":\"show <contact>\",\"list\":\"list [--stage X]\",\"due\":\"due (next steps due today/overdue)\",\"pipeline\":\"pipeline (counts by stage)\",\"ingest\":\"ingest '<json>' (bulk from grepapi leads)\"}}")
+}
+
+func main() {
+    a := args()
+    cmd := ""
+    if len(a) >= 2 { cmd = a[1] }
+    if cmd == "" || cmd == "help" { cmd_help(); return }
+    db := opendb()
+    if cmd == "add" { cmd_add(db, a); return }
+    if cmd == "log" { cmd_log(db, a); return }
+    if cmd == "stage" { cmd_stage(db, a); return }
+    if cmd == "next" { cmd_next(db, a); return }
+    if cmd == "show" { cmd_show(db, a); return }
+    if cmd == "list" { cmd_list(db, a); return }
+    if cmd == "due" { cmd_due(db); return }
+    if cmd == "pipeline" { cmd_pipeline(db); return }
+    if cmd == "ingest" { cmd_ingest(db, a); return }
+    sqlite_close(db)
+    write(2, "{\"ok\":false,\"error\":\"unknown command: " + esc(cmd) + "\"}\n")
+    exit(80)
+}
