@@ -326,6 +326,8 @@ func h_resend(req) (res) {
     if done == 0 {
         if etype == "email.received" || etype == "inbound.email" || etype == "email.inbound" {
             from := jget(body, ".data.from")
+            if index(from, "@") < 0 { from = jget(body, ".data.from.address") }   // from may be an object
+            if index(from, "@") < 0 { from = jget(body, ".data.from[0]") }
             subj := jget(body, ".data.subject")
             cid := wh_contact(db, from, from)
             if cid != "" { wh_event(db, cid, "REPLY — " + subj, ref); wh_stage(db, cid, "replied") }
