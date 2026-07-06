@@ -292,6 +292,29 @@ func wh_stage(db, cid, stage) {
     sqlite_exec(db, "UPDATE contacts SET stage=?, updated=? WHERE id=?", []string{stage, str(now()), cid})
 }
 
+// forward_reply — fetch the received email's body and forward a copy to CRM_FORWARD_TO
+// (e.g. a monitored inbox) via Resend. Best-effort; reply-to is set to the lead so a reply
+// from that inbox reaches them directly. Needs RESEND_API_KEY + CRM_FORWARD_TO in env.
+func forward_reply(ref, from_addr, subject) {
+    key := env("RESEND_API_KEY")
+    to := env("CRM_FORWARD_TO")
+    if key == "" || to == "" || ref == "" { return }
+    // pull the full received body (webhook carries metadata only)
+    gh := []string{"Authorization: Bearer " + key}
+    gstatus, gresp, gerr := http_request("GET", "https://api.resend.com/emails/inbound/" + ref, gh, "")
+    traw := "\"(body could not be retrieved)\""
+    if gerr == "" && gstatus == 200 {
+        t, terr := json_get(gresp, ".text")
+        if terr == "" && t != "" { traw = t }   // raw JSON string token — embed as-is (already escaped)
+    }
+    fromh := env("CRM_FORWARD_FROM")
+    if fromh == "" { fromh = "intrane CRM <no-reply@intrane.fr>" }
+    subj := "Reply from " + from_addr + " — " + subject
+    payload := "{\"from\":\"" + esc(fromh) + "\",\"to\":[\"" + esc(to) + "\"],\"reply_to\":\"" + esc(from_addr) + "\",\"subject\":\"" + esc(subj) + "\",\"text\":" + traw + "}"
+    ph := []string{"Authorization: Bearer " + key, "content-type: application/json"}
+    _, _, _ = http_request("POST", "https://api.resend.com/emails", ph, payload)
+}
+
 // POST /resend — a Resend webhook. Outbound events (opened/bounced/complained) act on
 // data.to[0]; inbound replies (email.received / inbound.email) act on data.from.
 func h_resend(req) (res) {
@@ -331,6 +354,7 @@ func h_resend(req) (res) {
             subj := jget(body, ".data.subject")
             cid := wh_contact(db, from, from)
             if cid != "" { wh_event(db, cid, "REPLY — " + subj, ref); wh_stage(db, cid, "replied") }
+            forward_reply(ref, from, subj)   // send a copy to the monitored inbox
             handled = "reply"; done = 1
         }
     }
