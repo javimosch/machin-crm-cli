@@ -336,6 +336,59 @@ func h_resend(req) (res) {
     res = ok_json("{\"ok\":true,\"handled\":\"" + esc(handled) + "\"}")
 }
 
+// sink_upsert — resolve/create a contact by email, then phone; return its id.
+func sink_upsert(db, name, email, phone, source) (id) {
+    id = ""
+    if email != "" {
+        r := sqlite_query(db, "SELECT id, name, company, email, phone, source, stage, next_action, next_due, created, updated FROM contacts WHERE email=? LIMIT 1", []string{email})
+        cs := parse(r, []Contact{})
+        if len(cs) > 0 { id = cs[0].id }
+    }
+    if id == "" {
+        if phone != "" {
+            r := sqlite_query(db, "SELECT id, name, company, email, phone, source, stage, next_action, next_due, created, updated FROM contacts WHERE phone=? LIMIT 1", []string{phone})
+            ps := parse(r, []Contact{})
+            if len(ps) > 0 { id = ps[0].id }
+        }
+    }
+    n := now()
+    if id == "" {
+        id = nid()
+        sqlite_exec(db, "INSERT INTO contacts(id,name,email,phone,source,stage,created,updated) VALUES(?,?,?,?,?,?,?,?)", []string{id, name, email, phone, source, "contacted", str(n), str(n)})
+        return id
+    }
+    // backfill missing fields on the existing contact
+    sqlite_exec(db, "UPDATE contacts SET name=COALESCE(NULLIF(name,''),?), email=COALESCE(NULLIF(email,''),?), phone=COALESCE(NULLIF(phone,''),?), source=COALESCE(NULLIF(source,''),?), updated=? WHERE id=?", []string{name, email, phone, source, str(n), id})
+}
+
+// POST /sink {name,email,phone,channel,summary,ref,direction} — authenticated remote
+// touch-logging so outreach glue writes to THIS canonical DB (single home). Bearer-token auth.
+func h_sink(req) (res) {
+    tok := env("CRM_INGEST_TOKEN")
+    if tok != "" {
+        if header(req, "authorization") != "Bearer " + tok { return response("401 Unauthorized", "application/json", "{\"ok\":false,\"error\":\"bad token\"}") }
+    }
+    body := req.body
+    email := jget(body, ".email")
+    phone := jget(body, ".phone")
+    if email == "" && phone == "" { return response("400 Bad Request", "application/json", "{\"ok\":false,\"error\":\"email or phone required\"}") }
+    name := jget(body, ".name")
+    channel := jget(body, ".channel")
+    if channel == "" { channel = "note" }
+    summary := jget(body, ".summary")
+    ref := jget(body, ".ref")
+    dir := jget(body, ".direction")
+    if dir == "" { dir = "out" }
+    source := jget(body, ".source")
+    if source == "" { source = "grepapi" }
+    db := opendb()
+    cid := sink_upsert(db, name, email, phone, source)
+    sqlite_exec(db, "INSERT INTO events(id,contact_id,channel,direction,summary,ref,ts) VALUES(?,?,?,?,?,?,?)", []string{nid(), cid, channel, dir, summary, ref, str(now())})
+    sqlite_exec(db, "UPDATE contacts SET stage='contacted' WHERE id=? AND stage='new'", []string{cid})
+    sqlite_close(db)
+    res = ok_json("{\"ok\":true,\"contact\":\"" + cid + "\",\"channel\":\"" + esc(channel) + "\"}")
+}
+
 func cmd_serve(a) {
     port := 8790
     if len(a) >= 3 { port = parse_int(a[2]) }
@@ -343,6 +396,7 @@ func cmd_serve(a) {
     serve(port, func(req) {
         if req.path == "/_health" { return ok_json("{\"ok\":true}") }
         if req.method == "POST" && has_prefix(req.path, "/resend") { return h_resend(req) }
+        if req.method == "POST" && has_prefix(req.path, "/sink") { return h_sink(req) }
         return not_found()
     })
 }
