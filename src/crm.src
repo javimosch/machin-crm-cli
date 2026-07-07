@@ -408,6 +408,38 @@ func h_resend(req) (res) {
     res = ok_json("{\"ok\":true,\"handled\":\"" + esc(handled) + "\"}")
 }
 
+// POST /bland — a Bland call-outcome webhook (the twin of /resend for phone). Bland posts
+// the finished call; we correlate via the metadata.outreach we set at dispatch, log the
+// outcome as a touch, and complete the outreach. Optional shared secret: CRM_BLAND_SECRET
+// checked against the x-crm-secret header.
+func h_bland(req) (res) {
+    secret := env("CRM_BLAND_SECRET")
+    if secret != "" {
+        if header(req, "x-crm-secret") != secret { return response("401 Unauthorized", "application/json", "{\"ok\":false,\"error\":\"bad secret\"}") }
+    }
+    body := req.body
+    oid := jget(body, ".metadata.outreach")
+    cid := jget(body, ".call_id")
+    ab := to_lower(jget(body, ".answered_by"))
+    db := opendb()
+    outcome := "call completed"
+    if ab == "human" { outcome = "call answered (human)" }
+    if ab == "voicemail" { outcome = "voicemail (no pickup)" }
+    if has_prefix(ab, "no") { outcome = "no answer" }
+    handled := "ignored:no-outreach-metadata"
+    if oid != "" {
+        qr := sqlite_query(db, "SELECT o.contact_id AS ccid FROM outreach o WHERE o.id=? LIMIT 1", []string{oid})
+        ccid := jget(qr, "[0].ccid")
+        if ccid != "" {
+            wh_event(db, ccid, outcome, cid)
+            sqlite_exec(db, "UPDATE outreach SET status='sent' WHERE id=? AND status='dispatched'", []string{oid})
+            handled = outcome
+        }
+    }
+    sqlite_close(db)
+    res = ok_json("{\"ok\":true,\"handled\":\"" + esc(handled) + "\"}")
+}
+
 // sink_upsert — resolve/create a contact by email, then phone; return its id.
 func sink_upsert(db, name, email, phone, source) (id) {
     id = ""
@@ -464,17 +496,18 @@ func h_sink(req) (res) {
 func cmd_serve(a) {
     port := 8790
     if len(a) >= 3 { port = parse_int(a[2]) }
-    say("{\"ok\":true,\"serving\":\"crm-cli webhook\",\"port\":" + str(port) + ",\"routes\":[\"POST /resend\",\"GET /_health\"]}")
+    say("{\"ok\":true,\"serving\":\"crm-cli webhook\",\"port\":" + str(port) + ",\"routes\":[\"POST /resend\",\"POST /bland\",\"POST /sink\",\"GET /_health\"]}")
     serve(port, func(req) {
         if req.path == "/_health" { return ok_json("{\"ok\":true}") }
         if req.method == "POST" && has_prefix(req.path, "/resend") { return h_resend(req) }
+        if req.method == "POST" && has_prefix(req.path, "/bland") { return h_bland(req) }
         if req.method == "POST" && has_prefix(req.path, "/sink") { return h_sink(req) }
         return not_found()
     })
 }
 
 func cmd_help() {
-    say("{\"ok\":true,\"name\":\"crm-cli\",\"tagline\":\"the agent-first CRM — sink for the outreach machine\",\"db\":\"$CRM_DB or ~/.crm-cli.db\",\"commands\":{\"add\":\"add <name> [--company --email --phone --source --stage]\",\"log\":\"log <contact> <channel> <summary> [--ref --direction]\",\"stage\":\"stage <contact> <new|contacted|replied|meeting|deal|won|lost>\",\"next\":\"next <contact> <action> [--due YYYY-MM-DD|+N days]\",\"show\":\"show <contact>\",\"list\":\"list [--stage X]\",\"due\":\"due (next steps due today/overdue)\",\"pipeline\":\"pipeline (counts by stage)\",\"ingest\":\"ingest '<json>' (bulk from grepapi leads)\",\"queue\":\"queue <contact> <email|phone> [--subject --body] (stage one outreach)\",\"queue-bulk\":\"queue-bulk '<json [{contact,channel,subject,body}]>' (load a campaign)\",\"campaign\":\"campaign [--channel email|phone] [--status queued|sent] (the staged campaign as JSON)\",\"sent\":\"sent <outreach-id> (mark sent + log touch + advance stage)\",\"send\":\"send [--limit N] (drip-send queued EMAIL outreach via SMTP; needs SMTP_* env; suppression + footer + stage advance)\",\"suppress\":\"suppress <email> [reason] (never email again; also unsub)\",\"serve\":\"serve [port] (Resend webhook sink: opens/bounces/complaints/replies -> the CRM; bounces/complaints auto-suppress)\"}}")
+    say("{\"ok\":true,\"name\":\"crm-cli\",\"tagline\":\"the agent-first CRM — sink for the outreach machine\",\"db\":\"$CRM_DB or ~/.crm-cli.db\",\"commands\":{\"add\":\"add <name> [--company --email --phone --source --stage]\",\"log\":\"log <contact> <channel> <summary> [--ref --direction]\",\"stage\":\"stage <contact> <new|contacted|replied|meeting|deal|won|lost>\",\"next\":\"next <contact> <action> [--due YYYY-MM-DD|+N days]\",\"show\":\"show <contact>\",\"list\":\"list [--stage X]\",\"due\":\"due (next steps due today/overdue)\",\"pipeline\":\"pipeline (counts by stage)\",\"ingest\":\"ingest '<json>' (bulk from grepapi leads)\",\"queue\":\"queue <contact> <email|phone> [--subject --body] (stage one outreach)\",\"queue-bulk\":\"queue-bulk '<json [{contact,channel,subject,body}]>' (load a campaign)\",\"campaign\":\"campaign [--channel email|phone] [--status queued|sent] (the staged campaign as JSON)\",\"sent\":\"sent <outreach-id> (mark sent + log touch + advance stage)\",\"send\":\"send [--limit N] (drip-send queued EMAIL outreach via SMTP; needs SMTP_* env; suppression + footer + stage advance)\",\"call\":\"call [--limit N] (drip-dispatch queued PHONE outreach as AI cold-calls via Bland; needs BLAND_API_KEY; outcomes return via serve POST /bland)\",\"suppress\":\"suppress <email|phone> [reason] (never contact again; alias unsub/dnc)\",\"serve\":\"serve [port] (webhook sink: POST /resend email events + POST /bland call outcomes -> the CRM; bounces/complaints auto-suppress)\"}}")
 }
 
 // crm queue <contact> <channel> [--subject X --body X]  -> stage one outreach message.
@@ -601,6 +634,37 @@ type Sendrow struct {
     body string
 }
 
+// Callrow is a queued phone outreach joined with its recipient, for cmd_call.
+type Callrow struct {
+    oid string
+    cid string
+    phone string
+    company string
+    body string
+}
+
+// e164 normalizes a national/spaced phone to E.164 for Bland. Strips separators;
+// a leading "0" becomes "+<country>" (CRM_COUNTRY_CODE, default 33 = France);
+// an already-"+" or bare-country-prefixed number is kept. Best-effort — malformed
+// input passes through and Bland rejects it (logged as an error, not a crash).
+func e164(phone) (e) {
+    cc := env("CRM_COUNTRY_CODE")
+    if cc == "" { cc = "33" }
+    d := ""
+    i := 0
+    for i < len(phone) {
+        c := substr(phone, i, i+1)
+        if c >= "0" && c <= "9" { d = d + c }
+        if c == "+" && d == "" { d = "+" }
+        i = i + 1
+    }
+    e = d
+    if has_prefix(d, "+") { return e }
+    if has_prefix(d, "0") { e = "+" + cc + substr(d, 1, len(d))  return e }
+    if has_prefix(d, cc) { e = "+" + d  return e }
+    e = "+" + d
+}
+
 // mail_footer appends the unsubscribe line (reply-based; SMTP_FROM identifies the sender).
 func mail_footer() (f) {
     from := env("SMTP_FROM")
@@ -666,14 +730,84 @@ func cmd_send(db, a) {
     say("{\"ok\":true,\"sent\":" + str(sent) + ",\"failed\":" + str(failed) + ",\"suppressed\":" + str(supp) + ",\"still_queued\":" + lv + "}")
 }
 
-// crm suppress <email> [reason]  -> never email this address again (also cancels its queued outreach).
+// crm call [--limit N]  -> drip-dispatch QUEUED phone outreach as AI cold-calls via Bland
+// (BYO BLAND_API_KEY). Symmetric to `send`: suppression-checked (the DNC list is the same
+// `suppress` table, keyed by the phone), polite 2s pacing, marks each dispatched|error, logs
+// the touch, advances stage. The call's outcome comes back later via the Bland webhook →
+// `crm serve` (POST /bland). Config: BLAND_API_KEY (required), CRM_CALL_WEBHOOK (public
+// /bland URL for outcomes), BLAND_VOICE, BLAND_LANG, CRM_COUNTRY_CODE (default 33).
+func cmd_call(db, a) {
+    key := env("BLAND_API_KEY")
+    if key == "" {
+        sqlite_close(db)
+        die(100, "Bland not configured — set BLAND_API_KEY (BYO; get one at bland.ai)")
+    }
+    limit := flagv(a, "--limit", "20")
+    hook := env("CRM_CALL_WEBHOOK")
+    voice := env("BLAND_VOICE")
+    lang := env("BLAND_LANG")
+    rows := sqlite_query(db, "SELECT o.id AS oid, o.contact_id AS cid, c.phone AS phone, c.name AS company, o.body AS body FROM outreach o JOIN contacts c ON c.id=o.contact_id WHERE o.status='queued' AND o.channel='phone' AND c.phone!='' ORDER BY o.created LIMIT " + limit, []string{})
+    todo := parse(rows, []Callrow{})
+    dispatched := 0
+    failed := 0
+    supp := 0
+    i := 0
+    for i < len(todo) {
+        m := todo[i]
+        num := e164(m.phone)
+        srows := sqlite_query(db, "SELECT addr FROM suppress WHERE addr=? OR addr=?", []string{num, m.phone})
+        if srows != "[]" {
+            sqlite_exec(db, "UPDATE outreach SET status='suppressed' WHERE id=?", []string{m.oid})
+            supp = supp + 1
+            i = i + 1
+            continue
+        }
+        body := "{\"phone_number\":\"" + esc(num) + "\",\"task\":\"" + esc(m.body) + "\",\"metadata\":{\"outreach\":\"" + esc(m.oid) + "\"}"
+        if voice != "" { body = body + ",\"voice\":\"" + esc(voice) + "\"" }
+        if lang != "" { body = body + ",\"language\":\"" + esc(lang) + "\"" }
+        if hook != "" { body = body + ",\"webhook\":\"" + esc(hook) + "\"" }
+        body = body + "}"
+        headers := []string{"content-type: application/json", "authorization: " + key}
+        burl := env("BLAND_URL")
+        if burl == "" { burl = "https://api.bland.ai" }
+        status, resp, err := http_request("POST", burl + "/v1/calls", headers, body)
+        n := now()
+        if err == "" && status == 200 {
+            cid := jget(resp, ".call_id")
+            sqlite_exec(db, "UPDATE outreach SET status='dispatched', sent_at=?, error=? WHERE id=?", []string{str(n), cid, m.oid})
+            sqlite_exec(db, "INSERT INTO events(id,contact_id,channel,direction,summary,ref,ts) VALUES(?,?,?,?,?,?,?)", []string{nid(), m.cid, "call", "out", "call dispatched → " + num, cid, str(n)})
+            sqlite_exec(db, "UPDATE contacts SET stage='contacted', next_action='', next_due='', updated=? WHERE id=? AND stage='new'", []string{str(n), m.cid})
+            write(2, "{\"event\":\"call_dispatched\",\"to\":\"" + esc(num) + "\",\"call_id\":\"" + esc(cid) + "\"}\n")
+            dispatched = dispatched + 1
+        } else {
+            detail := resp
+            if err != "" { detail = err }
+            sqlite_exec(db, "UPDATE outreach SET status='error', error=? WHERE id=?", []string{detail, m.oid})
+            write(2, "{\"warn\":\"call_failed\",\"to\":\"" + esc(num) + "\",\"detail\":" + json(detail) + "}\n")
+            failed = failed + 1
+        }
+        sleep(2000)   // drip: polite dialer, not a robo-cannon
+        i = i + 1
+    }
+    left := sqlite_query(db, "SELECT COUNT(*) AS n FROM outreach WHERE status='queued' AND channel='phone'", []string{})
+    lv, _ := json_get(left, "[0].n")
+    sqlite_close(db)
+    say("{\"ok\":true,\"dispatched\":" + str(dispatched) + ",\"failed\":" + str(failed) + ",\"suppressed\":" + str(supp) + ",\"still_queued\":" + lv + "}")
+}
+
+// crm suppress <email|phone> [reason]  -> never contact this address/number again (also
+// cancels its queued outreach on either channel). One list, keyed by the raw value.
 func cmd_suppress(db, a) {
-    if len(a) < 3 { die(80, "usage: crm suppress <email> [reason]") }
-    addr := to_lower(a[2])
+    if len(a) < 3 { die(80, "usage: crm suppress <email|phone> [reason]") }
+    raw := a[2]
+    addr := to_lower(raw)
     reason := "manual"
     if len(a) >= 4 { reason = a[3] }
     sqlite_exec(db, "INSERT OR IGNORE INTO suppress(addr,reason,ts) VALUES(?,?,?)", []string{addr, reason, str(now())})
-    sqlite_exec(db, "UPDATE outreach SET status='suppressed' WHERE status='queued' AND contact_id IN (SELECT id FROM contacts WHERE email=?)", []string{addr})
+    // also store the E.164 form so a call-time lookup by normalized number matches.
+    n164 := e164(raw)
+    if n164 != addr { sqlite_exec(db, "INSERT OR IGNORE INTO suppress(addr,reason,ts) VALUES(?,?,?)", []string{n164, reason, str(now())}) }
+    sqlite_exec(db, "UPDATE outreach SET status='suppressed' WHERE status='queued' AND contact_id IN (SELECT id FROM contacts WHERE email=? OR phone=?)", []string{addr, raw})
     sqlite_close(db)
     say("{\"ok\":true,\"suppressed\":\"" + esc(addr) + "\"}")
 }
@@ -699,7 +833,8 @@ func main() {
     if cmd == "campaign" { cmd_campaign(db, a); return }
     if cmd == "sent" { cmd_sent(db, a); return }
     if cmd == "send" { cmd_send(db, a); return }
-    if cmd == "suppress" || cmd == "unsub" { cmd_suppress(db, a); return }
+    if cmd == "call" { cmd_call(db, a); return }
+    if cmd == "suppress" || cmd == "unsub" || cmd == "dnc" { cmd_suppress(db, a); return }
     sqlite_close(db)
     write(2, "{\"ok\":false,\"error\":\"unknown command: " + esc(cmd) + "\"}\n")
     exit(80)

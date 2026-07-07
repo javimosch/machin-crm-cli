@@ -60,19 +60,33 @@ export SMTP_USER=resend SMTP_PASS=<resend-api-key>          # Resend's SMTP; or 
 crm send --limit 20        # → drip-sends 20 queued emails (2s apart), marks sent|error
 crm suppress <email>       # never email again + cancels its queued outreach (alias: unsub)
 ```
-**Phone** stays a hand-off: `crm campaign --channel phone --jsonl` → [bland-cli](https://github.com/javimosch/bland-cli)
-dials, then calls `crm sent <id>`. crm-cli owns the records; the dialer owns the calls.
+### Calling, natively — `crm call` (AI cold-calls over Bland)
+The twin of `crm send`, for the phone channel. It drip-dispatches the queued **phone** outreach as
+AI voice calls through [Bland](https://bland.ai) — bring your own `BLAND_API_KEY` — and the call
+outcome comes back through the same webhook sink:
+```
+export BLAND_API_KEY=<your-bland-key>       # BYO — you own the account + the compliance
+export CRM_CALL_WEBHOOK=https://crm.you.dev/bland   # where Bland posts the outcome
+export BLAND_LANG=fr CRM_COUNTRY_CODE=33     # optional: language + E.164 country default
+crm call --limit 20        # → dials 20 queued numbers (the call script is the outreach body)
+crm suppress <phone>       # DNC: never call again + cancels queued (alias dnc)
+```
+Numbers are normalized to E.164, `crm serve` receives the outcome on `POST /bland` (answered /
+voicemail / no-answer) and logs it as a touch. **Cold-calling is more regulated than email**
+(TCPA, Bloctel, calling hours) — BYO-Bland means *you* own the account, consent, and opt-out list.
 
-### The whole loop, one binary
+### The whole outbound loop, one binary
 ```
 crm ingest        →  contacts land (the sink)
-crm queue-bulk    →  stage a channel-routed campaign
-crm send          →  drip-send email over SMTP  (bland-cli handles phone)
-crm serve         →  Resend webhook: opens/bounces/replies auto-log;
-                     bounces & complaints auto-suppress
+crm queue-bulk    →  stage a channel-routed campaign (email + calls)
+crm send          →  drip-send email over SMTP     ┐  both BYO
+crm call          →  drip-dial cold-calls over Bland ┘
+crm serve         →  webhook sink: Resend (opens/bounces/replies, auto-suppress)
+                                 + Bland (call outcomes) → the CRM
 ```
-A campaign goes **queued → sent → opened → replied** (or → bounced/suppressed) without leaving the
-CRM. Local-first and single-binary today; the same shape lifts to a hosted multi-tenant service.
+A lead goes **queued → sent/dispatched → opened/answered → replied** (or bounced / no-answer /
+suppressed) without leaving the CRM. Email *and* phone, both self-tracking, both BYO. Local-first
+and single-binary today; the same shape lifts to a hosted multi-tenant service.
 
 ## Webhook sink — `crm serve` (auto-log replies, opens, bounces)
 crm-cli can receive **Resend webhooks** and update itself, so even *inbound* signals log with
