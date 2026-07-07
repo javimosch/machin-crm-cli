@@ -63,6 +63,9 @@ func opendb() (db) {
     // outreach = a staged, channel-routed campaign message per contact (email or phone).
     // The send glue (Resend batch / bland calling) reads `crm campaign` and marks `crm sent`.
     sqlite_exec(db, "CREATE TABLE IF NOT EXISTS outreach(id TEXT PRIMARY KEY, contact_id TEXT, channel TEXT, subject TEXT, body TEXT, status TEXT DEFAULT 'queued', created INTEGER, sent_at INTEGER DEFAULT 0)", []string{})
+    sqlite_exec(db, "ALTER TABLE outreach ADD COLUMN error TEXT DEFAULT ''", []string{})   // no-op once it exists
+    // suppression list: addresses never emailed again (manual unsub or a bounce/complaint from serve).
+    sqlite_exec(db, "CREATE TABLE IF NOT EXISTS suppress(addr TEXT PRIMARY KEY, reason TEXT, ts INTEGER)", []string{})
 }
 
 func nid() (s) { s = to_hex(rand_bytes(8)) }
@@ -325,6 +328,14 @@ func wh_stage(db, cid, stage) {
     sqlite_exec(db, "UPDATE contacts SET stage=?, updated=? WHERE id=?", []string{stage, str(now()), cid})
 }
 
+// wh_suppress — permanently suppress an address (from a bounce/complaint webhook) so `crm send`
+// never emails it again, and cancel any of its still-queued outreach.
+func wh_suppress(db, addr, reason) {
+    a := to_lower(addr)
+    sqlite_exec(db, "INSERT OR IGNORE INTO suppress(addr,reason,ts) VALUES(?,?,?)", []string{a, reason, str(now())})
+    sqlite_exec(db, "UPDATE outreach SET status='suppressed' WHERE status='queued' AND contact_id IN (SELECT id FROM contacts WHERE email=?)", []string{a})
+}
+
 // forward_reply — fetch the received email's body and forward a copy to CRM_FORWARD_TO
 // (e.g. a monitored inbox) via Resend. Best-effort; reply-to is set to the lead so a reply
 // from that inbox reaches them directly. Needs RESEND_API_KEY + CRM_FORWARD_TO in env.
@@ -366,11 +377,13 @@ func h_resend(req) (res) {
     if etype == "email.bounced" {
         cid := wh_contact(db, to, to)
         if cid != "" { wh_event(db, cid, "bounced — address invalid", ref); wh_stage(db, cid, "lost") }
+        wh_suppress(db, to, "bounced")
         handled = "bounced"; done = 1
     }
     if done == 0 && etype == "email.complained" {
         cid := wh_contact(db, to, to)
         if cid != "" { wh_event(db, cid, "spam complaint — suppress", ref); wh_stage(db, cid, "lost") }
+        wh_suppress(db, to, "complained")
         handled = "complained"; done = 1
     }
     if done == 0 && etype == "email.opened" {
@@ -461,7 +474,7 @@ func cmd_serve(a) {
 }
 
 func cmd_help() {
-    say("{\"ok\":true,\"name\":\"crm-cli\",\"tagline\":\"the agent-first CRM — sink for the outreach machine\",\"db\":\"$CRM_DB or ~/.crm-cli.db\",\"commands\":{\"add\":\"add <name> [--company --email --phone --source --stage]\",\"log\":\"log <contact> <channel> <summary> [--ref --direction]\",\"stage\":\"stage <contact> <new|contacted|replied|meeting|deal|won|lost>\",\"next\":\"next <contact> <action> [--due YYYY-MM-DD|+N days]\",\"show\":\"show <contact>\",\"list\":\"list [--stage X]\",\"due\":\"due (next steps due today/overdue)\",\"pipeline\":\"pipeline (counts by stage)\",\"ingest\":\"ingest '<json>' (bulk from grepapi leads)\",\"queue\":\"queue <contact> <email|phone> [--subject --body] (stage one outreach)\",\"queue-bulk\":\"queue-bulk '<json [{contact,channel,subject,body}]>' (load a campaign)\",\"campaign\":\"campaign [--channel email|phone] [--status queued|sent] (the staged campaign as JSON)\",\"sent\":\"sent <outreach-id> (mark sent + log touch + advance stage)\",\"serve\":\"serve [port] (Resend webhook sink: opens/bounces/complaints/replies -> the CRM)\"}}")
+    say("{\"ok\":true,\"name\":\"crm-cli\",\"tagline\":\"the agent-first CRM — sink for the outreach machine\",\"db\":\"$CRM_DB or ~/.crm-cli.db\",\"commands\":{\"add\":\"add <name> [--company --email --phone --source --stage]\",\"log\":\"log <contact> <channel> <summary> [--ref --direction]\",\"stage\":\"stage <contact> <new|contacted|replied|meeting|deal|won|lost>\",\"next\":\"next <contact> <action> [--due YYYY-MM-DD|+N days]\",\"show\":\"show <contact>\",\"list\":\"list [--stage X]\",\"due\":\"due (next steps due today/overdue)\",\"pipeline\":\"pipeline (counts by stage)\",\"ingest\":\"ingest '<json>' (bulk from grepapi leads)\",\"queue\":\"queue <contact> <email|phone> [--subject --body] (stage one outreach)\",\"queue-bulk\":\"queue-bulk '<json [{contact,channel,subject,body}]>' (load a campaign)\",\"campaign\":\"campaign [--channel email|phone] [--status queued|sent] (the staged campaign as JSON)\",\"sent\":\"sent <outreach-id> (mark sent + log touch + advance stage)\",\"send\":\"send [--limit N] (drip-send queued EMAIL outreach via SMTP; needs SMTP_* env; suppression + footer + stage advance)\",\"suppress\":\"suppress <email> [reason] (never email again; also unsub)\",\"serve\":\"serve [port] (Resend webhook sink: opens/bounces/complaints/replies -> the CRM; bounces/complaints auto-suppress)\"}}")
 }
 
 // crm queue <contact> <channel> [--subject X --body X]  -> stage one outreach message.
@@ -579,6 +592,92 @@ func cmd_sent(db, a) {
     say("{\"ok\":true,\"sent\":\"" + esc(oid) + "\",\"channel\":\"" + esc(o.channel) + "\"}")
 }
 
+// Sendrow is a queued email outreach joined with its recipient, for cmd_send.
+type Sendrow struct {
+    oid string
+    cid string
+    email string
+    subject string
+    body string
+}
+
+// mail_footer appends the unsubscribe line (reply-based; SMTP_FROM identifies the sender).
+func mail_footer() (f) {
+    from := env("SMTP_FROM")
+    f = ""
+    if from != "" {
+        f = "\n\n—\nEnvoyé par " + from + ". Répondez « STOP » et vous ne serez plus contacté."
+    }
+}
+
+// crm send [--limit N]  -> drip-send QUEUED email outreach via SMTP (Resend/any relay).
+// Suppression-checked, unsubscribe footer, polite 2s drip. Marks each sent|error, logs the
+// touch, advances the contact stage. Phone outreach is exported (campaign --channel phone
+// --jsonl) to bland-cli, not sent here. Config: SMTP_HOST SMTP_PORT SMTP_FROM SMTP_USER
+// SMTP_PASS SMTP_TLS (point at smtp.resend.com:587, user 'resend', pass = API key).
+func cmd_send(db, a) {
+    host := env("SMTP_HOST")
+    from := env("SMTP_FROM")
+    if host == "" || from == "" {
+        sqlite_close(db)
+        die(100, "SMTP not configured — set SMTP_HOST SMTP_PORT SMTP_FROM SMTP_USER SMTP_PASS SMTP_TLS")
+    }
+    port := parse_int(env("SMTP_PORT"))
+    if port == 0 { port = 587 }
+    use_tls := 1
+    if env("SMTP_TLS") == "0" { use_tls = 0 }
+    limit := flagv(a, "--limit", "20")
+
+    rows := sqlite_query(db, "SELECT o.id AS oid, o.contact_id AS cid, c.email AS email, o.subject AS subject, o.body AS body FROM outreach o JOIN contacts c ON c.id=o.contact_id WHERE o.status='queued' AND o.channel='email' AND c.email!='' ORDER BY o.created LIMIT " + limit, []string{})
+    todo := parse(rows, []Sendrow{})
+    sent := 0
+    failed := 0
+    supp := 0
+    i := 0
+    for i < len(todo) {
+        m := todo[i]
+        addr := to_lower(m.email)
+        srows := sqlite_query(db, "SELECT addr FROM suppress WHERE addr=?", []string{addr})
+        if srows != "[]" {
+            sqlite_exec(db, "UPDATE outreach SET status='suppressed' WHERE id=?", []string{m.oid})
+            supp = supp + 1
+            i = i + 1
+            continue
+        }
+        ok, errmsg := smtp_send(host, port, from, m.email, m.subject, m.body + mail_footer(), env("SMTP_USER"), env("SMTP_PASS"), use_tls)
+        n := now()
+        if ok == 1 {
+            sqlite_exec(db, "UPDATE outreach SET status='sent', sent_at=? WHERE id=?", []string{str(n), m.oid})
+            sqlite_exec(db, "INSERT INTO events(id,contact_id,channel,direction,summary,ref,ts) VALUES(?,?,?,?,?,?,?)", []string{nid(), m.cid, "email", "out", "sent: " + m.subject, m.oid, str(n)})
+            sqlite_exec(db, "UPDATE contacts SET stage='contacted', next_action='', next_due='', updated=? WHERE id=? AND stage='new'", []string{str(n), m.cid})
+            write(2, "{\"event\":\"sent\",\"to\":" + json(m.email) + "}\n")
+            sent = sent + 1
+        } else {
+            sqlite_exec(db, "UPDATE outreach SET status='error', error=? WHERE id=?", []string{errmsg, m.oid})
+            write(2, "{\"warn\":\"send_failed\",\"to\":" + json(m.email) + ",\"detail\":" + json(errmsg) + "}\n")
+            failed = failed + 1
+        }
+        sleep(2000)   // drip: polite sender, not a cannon
+        i = i + 1
+    }
+    left := sqlite_query(db, "SELECT COUNT(*) AS n FROM outreach WHERE status='queued' AND channel='email'", []string{})
+    lv, _ := json_get(left, "[0].n")
+    sqlite_close(db)
+    say("{\"ok\":true,\"sent\":" + str(sent) + ",\"failed\":" + str(failed) + ",\"suppressed\":" + str(supp) + ",\"still_queued\":" + lv + "}")
+}
+
+// crm suppress <email> [reason]  -> never email this address again (also cancels its queued outreach).
+func cmd_suppress(db, a) {
+    if len(a) < 3 { die(80, "usage: crm suppress <email> [reason]") }
+    addr := to_lower(a[2])
+    reason := "manual"
+    if len(a) >= 4 { reason = a[3] }
+    sqlite_exec(db, "INSERT OR IGNORE INTO suppress(addr,reason,ts) VALUES(?,?,?)", []string{addr, reason, str(now())})
+    sqlite_exec(db, "UPDATE outreach SET status='suppressed' WHERE status='queued' AND contact_id IN (SELECT id FROM contacts WHERE email=?)", []string{addr})
+    sqlite_close(db)
+    say("{\"ok\":true,\"suppressed\":\"" + esc(addr) + "\"}")
+}
+
 func main() {
     a := args()
     cmd := ""
@@ -599,6 +698,8 @@ func main() {
     if cmd == "queue-bulk" { cmd_queue_bulk(db, a); return }
     if cmd == "campaign" { cmd_campaign(db, a); return }
     if cmd == "sent" { cmd_sent(db, a); return }
+    if cmd == "send" { cmd_send(db, a); return }
+    if cmd == "suppress" || cmd == "unsub" { cmd_suppress(db, a); return }
     sqlite_close(db)
     write(2, "{\"ok\":false,\"error\":\"unknown command: " + esc(cmd) + "\"}\n")
     exit(80)

@@ -48,8 +48,31 @@ crm campaign --channel phone --jsonl       #            → {phone,company,scrip
 crm sent <outreach-id>                     # after each send: marks sent, logs a touch, stage→contacted
 ```
 `--jsonl` is the send-glue contract: pipe it straight into a Resend batch / bland caller, or
-`> batch.jsonl` to backfill a file. `crm serve` then auto-logs opens/bounces/replies from the
-Resend webhook — so a campaign goes queued → sent → replied without leaving the CRM.
+`> batch.jsonl` to backfill a file.
+
+### Sending, natively — `crm send` (email over SMTP)
+crm-cli sends cold-email itself — no external mailer. It drip-sends the queued **email** outreach
+over SMTP (point it at Resend, or any relay), respects a suppression list, appends an unsubscribe
+footer, and on each send logs a touch + advances the contact's stage:
+```
+export SMTP_HOST=smtp.resend.com SMTP_PORT=587 SMTP_FROM="you@yourdomain"
+export SMTP_USER=resend SMTP_PASS=<resend-api-key>          # Resend's SMTP; or any relay
+crm send --limit 20        # → drip-sends 20 queued emails (2s apart), marks sent|error
+crm suppress <email>       # never email again + cancels its queued outreach (alias: unsub)
+```
+**Phone** stays a hand-off: `crm campaign --channel phone --jsonl` → [bland-cli](https://github.com/javimosch/bland-cli)
+dials, then calls `crm sent <id>`. crm-cli owns the records; the dialer owns the calls.
+
+### The whole loop, one binary
+```
+crm ingest        →  contacts land (the sink)
+crm queue-bulk    →  stage a channel-routed campaign
+crm send          →  drip-send email over SMTP  (bland-cli handles phone)
+crm serve         →  Resend webhook: opens/bounces/replies auto-log;
+                     bounces & complaints auto-suppress
+```
+A campaign goes **queued → sent → opened → replied** (or → bounced/suppressed) without leaving the
+CRM. Local-first and single-binary today; the same shape lifts to a hosted multi-tenant service.
 
 ## Webhook sink — `crm serve` (auto-log replies, opens, bounces)
 crm-cli can receive **Resend webhooks** and update itself, so even *inbound* signals log with
