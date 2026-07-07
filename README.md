@@ -42,6 +42,7 @@ crm ingest '<json>'           # bulk upsert from grepapi leads (the sink)
 crm queue <contact> <email|phone> [--subject --body]   # stage one outreach
 crm queue-bulk '<json>'       # load a whole channel-routed campaign (array of {contact,channel,subject,body})
 crm campaign [--channel email|phone] [--status queued|sent]   # the staged campaign as JSON
+crm followups [--days 3 --max-touches 3] [--queue --subject S --body B]   # who is due a bump; --queue stages wave 2
 crm sent <outreach-id>        # mark sent + log the touch + advance the contact to contacted
 ```
 `<contact>` resolves by id, exact email, or a name/company substring. DB at `$CRM_DB`
@@ -63,6 +64,20 @@ crm sent <outreach-id>                     # after each send: marks sent, logs a
 ```
 `--jsonl` is the send-glue contract: pipe it straight into a Resend batch / bland caller, or
 `> batch.jsonl` to backfill a file.
+
+### Follow-ups — `crm followups` (the second half of a campaign)
+Most cold-email replies come from touches 2-3; `followups` selects who is **due a bump** —
+`stage=contacted`, last outbound email ≥ N days ago, never replied (no inbound event), under the
+touch cap, nothing already queued — and with `--queue` stages wave 2 as ordinary outreach that
+`crm send` drip-sends. `{{name}}`/`{{company}}` are substituted per contact:
+```
+crm followups --days 3                        # dry-run: the candidates as JSON
+crm followups --days 3 --queue \
+  --subject "Re: quick note for {{company}}" \
+  --body "Hi, bumping my last note — still relevant for {{company}}?"
+crm send --limit 20                           # drip wave 2
+```
+Copy is the caller's job; the CRM owns the who/when (and never double-queues or bumps a replier).
 
 ### Sending, natively — `crm send` (email over SMTP)
 crm-cli sends cold-email itself — no external mailer. It drip-sends the queued **email** outreach
