@@ -76,7 +76,10 @@ func read_reply(r) (code, ok) {
 func smtp_build(from, to, subject, body) (m) {
     m = "From: " + from + "\r\n" +
         "To: " + to + "\r\n" +
-        "Subject: " + subject + "\r\n" +
+        "Subject: " + subject + "\r\n"
+    rt := env("SMTP_REPLY_TO")   // optional: route replies to a monitored inbox
+    if rt != "" { m = m + "Reply-To: " + rt + "\r\n" }
+    m = m +
         "MIME-Version: 1.0\r\n" +
         "Content-Type: text/plain; charset=utf-8\r\n" +
         "\r\n"
@@ -101,6 +104,17 @@ func smtp_write(fd, tls, s) (n) {
 // function scope would otherwise unify them into a single conflicting `c`.
 func smtp_close(fd, tls) {
     if tls != 0 { tls_close(tls) } else { close(fd) }
+}
+
+// smtp_bare strips a display name: "Javi <a@b>" -> "a@b" (the SMTP envelope
+// takes a bare address; the display form belongs only in the From: header).
+func smtp_bare(a) (out) {
+    out = a
+    lt := index(a, "<")
+    if lt >= 0 {
+        gt := index(a, ">")
+        if gt > lt { out = substr(a, lt + 1, gt) }
+    }
 }
 
 // smtp_send sends one message. user=="" skips AUTH; use_tls==1 upgrades to
@@ -150,14 +164,14 @@ func smtp_send(host, port, from, to, subject, body, user, pass, use_tls) (ok, er
         if code != 235 { errmsg = "authentication failed"  smtp_close(conn, tls)  return }
     }
 
-    w = smtp_write(conn, tls, "MAIL FROM:<" + from + ">\r\n")
+    w = smtp_write(conn, tls, "MAIL FROM:<" + smtp_bare(from) + ">\r\n")
     code, good = read_reply(r)
     if code != 250 { errmsg = "MAIL FROM rejected"  smtp_close(conn, tls)  return }
 
     for _, rcpt := range split(to, ",") {
         addr := trim(rcpt)
         if addr != "" {
-            w = smtp_write(conn, tls, "RCPT TO:<" + addr + ">\r\n")
+            w = smtp_write(conn, tls, "RCPT TO:<" + smtp_bare(addr) + ">\r\n")
             code, good = read_reply(r)
             if code != 250 { errmsg = "RCPT rejected: " + addr  smtp_close(conn, tls)  return }
         }

@@ -82,7 +82,7 @@ func say(s) { write(1, s + "\n") }
 
 // Bumped per release; the released binary reports it via `crm version`, and it's what
 // `crm update` compares against. Keep in lockstep with the git tag.
-func version_str() (v) { v = "0.2.0" }
+func version_str() (v) { v = "0.2.1" }
 
 func die(code, msg) {
     write(2, "{\"ok\":false,\"error\":\"" + esc(msg) + "\"}\n")
