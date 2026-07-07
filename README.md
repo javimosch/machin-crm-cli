@@ -29,10 +29,14 @@ Hosted, always-on version: **[crmd.intrane.fr](https://crmd.intrane.fr)**.
 `./build.sh`  →  `./crm`  (needs `machin` on PATH + a C compiler)
 
 ## Tests
-`./test.sh` — unit tests for the pure core (`src/core.src`: `e164` phone normalization,
-`esc` JSON-escaping, arg parsing) via machin's native `machin test` + `framework/test.src`
-asserts. The side-effect-free logic is factored into `src/core.src` so it's testable without
-the CLI's `main()`.
+`./test.sh` runs two suites:
+- **unit** (`test/core_test.src`, via `machin test`) — the pure core in `src/core.src`
+  (`e164` phone normalization, `esc` JSON-escaping, arg parsing). Side-effect-free logic is
+  factored into `src/core.src` so it's testable without the CLI's `main()`.
+- **integration** (`test/integration.sh`) — the DB-backed command business rules driven
+  through the built binary against a throwaway `CRM_DB`: add/dedup (email+phone), stage
+  transitions, relative due dates, ingest, the campaign lifecycle (queue-bulk → campaign →
+  sent), suppression, and follow-up selection (aged/no-reply/not-queued/under-cap).
 
 ## Commands
 ```
