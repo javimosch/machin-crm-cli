@@ -1,0 +1,51 @@
+// Unit tests for src/core.src (the pure helpers). Run: ./test.sh  (or `machin test`).
+// Composed as: framework/test.src + src/core.src + this file.
+
+func test_e164() {
+    // French national (spaced) -> E.164
+    assert_eq_str(e164("09 80 80 80 35"), "+33980808035", "e164 fr national spaced")
+    assert_eq_str(e164("0612345678"), "+33612345678", "e164 fr mobile")
+    // already E.164 -> unchanged (separators stripped)
+    assert_eq_str(e164("+33 6 12 34 56 78"), "+33612345678", "e164 already-plus")
+    // bare country prefix (no +) -> +
+    assert_eq_str(e164("33612345678"), "+33612345678", "e164 bare cc prefix")
+    // 00 international prefix -> + (regression: used to double the country code)
+    assert_eq_str(e164("0033612345678"), "+33612345678", "e164 00 intl prefix")
+    // punctuation stripped
+    assert_eq_str(e164("(0)6-12.34.56.78"), "+33612345678", "e164 punctuation")
+    // empty -> "+"
+    assert_eq_str(e164(""), "+", "e164 empty")
+}
+
+func test_esc() {
+    assert_eq_str(esc("plain"), "plain", "esc plain")
+    assert_eq_str(esc("a\"b"), "a\\\"b", "esc quote")
+    assert_eq_str(esc("a\\b"), "a\\\\b", "esc backslash")
+    assert_eq_str(esc("a\nb"), "a\\nb", "esc newline")
+    assert_eq_str(esc("a\tb"), "a\\tb", "esc tab")
+    // backslash-before-quote: backslash escaped first, then quote (order matters)
+    assert_eq_str(esc("\\\""), "\\\\\\\"", "esc backslash-then-quote")
+}
+
+func test_flags() {
+    a := []string{"crm", "send", "--limit", "20", "--dry"}
+    assert_eq_str(flagv(a, "--limit", "10"), "20", "flagv present")
+    assert_eq_str(flagv(a, "--missing", "def"), "def", "flagv default")
+    // flag with no following value -> default (no index overflow)
+    assert_eq_str(flagv(a, "--dry", "x"), "x", "flagv trailing no-value")
+    assert_eq_int(has_flag(a, "--dry"), 1, "has_flag present")
+    assert_eq_int(has_flag(a, "--nope"), 0, "has_flag absent")
+}
+
+func test_version() {
+    // shape check: non-empty (kept in lockstep with the git tag)
+    assert(len(version_str()) > 0, "version non-empty")
+}
+
+func main() {
+    test_e164()
+    test_esc()
+    test_flags()
+    test_version()
+    test_summary()
+}

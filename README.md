@@ -28,6 +28,12 @@ Hosted, always-on version: **[crmd.intrane.fr](https://crmd.intrane.fr)**.
 ## Build from source
 `./build.sh`  →  `./crm`  (needs `machin` on PATH + a C compiler)
 
+## Tests
+`./test.sh` — unit tests for the pure core (`src/core.src`: `e164` phone normalization,
+`esc` JSON-escaping, arg parsing) via machin's native `machin test` + `framework/test.src`
+asserts. The side-effect-free logic is factored into `src/core.src` so it's testable without
+the CLI's `main()`.
+
 ## Commands
 ```
 crm add <name> [--company --email --phone --source --stage]   # upsert (by email)
