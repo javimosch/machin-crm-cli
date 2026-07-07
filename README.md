@@ -11,8 +11,22 @@ Every CRM dies of stale data because humans won't do data entry. This one is wri
 driven by an agent and auto-fed by the outreach tools — so it stays current with ~zero
 manual effort. The wedge isn't "self-maintaining" (table stakes); it's **agent-first**.
 
-## Build
-`./build.sh`  →  `./crm`  (needs `machin` on PATH)
+## Install
+```sh
+curl -fsSL https://raw.githubusercontent.com/javimosch/machin-crm-cli/master/install.sh | sh
+```
+Downloads the prebuilt binary (no compiler needed), verifies it runs on your box, and falls
+back to build-from-source otherwise. Then:
+```sh
+crm version     # the installed release
+crm update      # self-update to the latest release (honors CRM_BIN_DIR)
+```
+Prebuilt is `linux-x64` (glibc ≥ 2.35, needs `libssl3` + `libsqlite3`; Ubuntu 22.04+/Debian 12+).
+Older glibc / musl / macOS / arm64 auto-fall-back to source (needs `machin` + a C compiler + git).
+Hosted, always-on version: **[crmd.intrane.fr](https://crmd.intrane.fr)**.
+
+## Build from source
+`./build.sh`  →  `./crm`  (needs `machin` on PATH + a C compiler)
 
 ## Commands
 ```
