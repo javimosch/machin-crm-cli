@@ -30,6 +30,26 @@ type Event struct {
 
 type Duerow struct { d string }
 
+// Qitem is one prepared outreach in a bulk campaign load (crm queue-bulk).
+type Qitem struct {
+    contact string
+    channel string
+    subject string
+    body string
+}
+
+// Outreach is a stored campaign row.
+type Outreach struct {
+    id string
+    contact_id string
+    channel string
+    subject string
+    body string
+    status string
+    created int
+    sent_at int
+}
+
 func dbpath() (p) {
     p = env("CRM_DB")
     if p == "" { p = env("HOME") + "/.crm-cli.db" }
@@ -40,6 +60,9 @@ func opendb() (db) {
     sqlite_exec(db, "PRAGMA busy_timeout=3000", []string{})
     sqlite_exec(db, "CREATE TABLE IF NOT EXISTS contacts(id TEXT PRIMARY KEY, name TEXT, company TEXT, email TEXT, phone TEXT, source TEXT, stage TEXT DEFAULT 'new', next_action TEXT DEFAULT '', next_due TEXT DEFAULT '', created INTEGER, updated INTEGER)", []string{})
     sqlite_exec(db, "CREATE TABLE IF NOT EXISTS events(id TEXT PRIMARY KEY, contact_id TEXT, channel TEXT, direction TEXT, summary TEXT, ref TEXT, ts INTEGER)", []string{})
+    // outreach = a staged, channel-routed campaign message per contact (email or phone).
+    // The send glue (Resend batch / bland calling) reads `crm campaign` and marks `crm sent`.
+    sqlite_exec(db, "CREATE TABLE IF NOT EXISTS outreach(id TEXT PRIMARY KEY, contact_id TEXT, channel TEXT, subject TEXT, body TEXT, status TEXT DEFAULT 'queued', created INTEGER, sent_at INTEGER DEFAULT 0)", []string{})
 }
 
 func nid() (s) { s = to_hex(rand_bytes(8)) }
@@ -428,7 +451,79 @@ func cmd_serve(a) {
 }
 
 func cmd_help() {
-    say("{\"ok\":true,\"name\":\"crm-cli\",\"tagline\":\"the agent-first CRM — sink for the outreach machine\",\"db\":\"$CRM_DB or ~/.crm-cli.db\",\"commands\":{\"add\":\"add <name> [--company --email --phone --source --stage]\",\"log\":\"log <contact> <channel> <summary> [--ref --direction]\",\"stage\":\"stage <contact> <new|contacted|replied|meeting|deal|won|lost>\",\"next\":\"next <contact> <action> [--due YYYY-MM-DD|+N days]\",\"show\":\"show <contact>\",\"list\":\"list [--stage X]\",\"due\":\"due (next steps due today/overdue)\",\"pipeline\":\"pipeline (counts by stage)\",\"ingest\":\"ingest '<json>' (bulk from grepapi leads)\",\"serve\":\"serve [port] (Resend webhook sink: opens/bounces/complaints/replies -> the CRM)\"}}")
+    say("{\"ok\":true,\"name\":\"crm-cli\",\"tagline\":\"the agent-first CRM — sink for the outreach machine\",\"db\":\"$CRM_DB or ~/.crm-cli.db\",\"commands\":{\"add\":\"add <name> [--company --email --phone --source --stage]\",\"log\":\"log <contact> <channel> <summary> [--ref --direction]\",\"stage\":\"stage <contact> <new|contacted|replied|meeting|deal|won|lost>\",\"next\":\"next <contact> <action> [--due YYYY-MM-DD|+N days]\",\"show\":\"show <contact>\",\"list\":\"list [--stage X]\",\"due\":\"due (next steps due today/overdue)\",\"pipeline\":\"pipeline (counts by stage)\",\"ingest\":\"ingest '<json>' (bulk from grepapi leads)\",\"queue\":\"queue <contact> <email|phone> [--subject --body] (stage one outreach)\",\"queue-bulk\":\"queue-bulk '<json [{contact,channel,subject,body}]>' (load a campaign)\",\"campaign\":\"campaign [--channel email|phone] [--status queued|sent] (the staged campaign as JSON)\",\"sent\":\"sent <outreach-id> (mark sent + log touch + advance stage)\",\"serve\":\"serve [port] (Resend webhook sink: opens/bounces/complaints/replies -> the CRM)\"}}")
+}
+
+// crm queue <contact> <channel> [--subject X --body X]  -> stage one outreach message.
+func cmd_queue(db, a) {
+    if len(a) < 4 { die(80, "usage: crm queue <contact> <email|phone> [--subject X --body X]") }
+    cid := resolve(db, a[2])
+    if cid == "" { die(90, "no such contact: " + esc(a[2])) }
+    ch := a[3]
+    subj := flagv(a, "--subject", "")
+    body := flagv(a, "--body", "")
+    sqlite_exec(db, "INSERT INTO outreach(id,contact_id,channel,subject,body,status,created) VALUES(?,?,?,?,?, 'queued', ?)", []string{nid(), cid, ch, subj, body, str(now())})
+    sqlite_close(db)
+    say("{\"ok\":true,\"queued\":1,\"channel\":\"" + esc(ch) + "\"}")
+}
+
+// crm queue-bulk '<json array of {contact,channel,subject,body}>'  -> load a whole campaign.
+// Channel routing is the CALLER's job (email if the lead has one, else phone) — this just
+// stores what it's given, so the CRM is the single source of truth for the campaign.
+func cmd_queue_bulk(db, a) {
+    if len(a) < 3 { die(80, "usage: crm queue-bulk '<json array of {contact,channel,subject,body}>'") }
+    items := parse(a[2], []Qitem{})
+    n := now()
+    added := 0
+    miss := 0
+    i := 0
+    for i < len(items) {
+        it := items[i]
+        cid := resolve(db, it.contact)
+        if cid == "" {
+            miss = miss + 1
+        } else {
+            ch := it.channel
+            if ch == "" { ch = "email" }
+            sqlite_exec(db, "INSERT INTO outreach(id,contact_id,channel,subject,body,status,created) VALUES(?,?,?,?,?, 'queued', ?)", []string{nid(), cid, ch, it.subject, it.body, str(n)})
+            added = added + 1
+        }
+        i = i + 1
+    }
+    sqlite_close(db)
+    say("{\"ok\":true,\"queued\":" + str(added) + ",\"unresolved\":" + str(miss) + ",\"received\":" + str(len(items)) + "}")
+}
+
+// crm campaign [--channel email|phone] [--status queued|sent]  -> the staged campaign as JSON,
+// each row joined with its contact — exactly what a Resend batch / bland caller consumes.
+func cmd_campaign(db, a) {
+    ch := flagv(a, "--channel", "")
+    st := flagv(a, "--status", "queued")
+    rows := ""
+    sel := "SELECT o.id, o.channel, o.subject, o.body, o.status, c.name AS company, c.email, c.phone FROM outreach o JOIN contacts c ON c.id=o.contact_id WHERE o.status=?"
+    if ch == "" {
+        rows = sqlite_query(db, sel + " ORDER BY o.channel, c.name", []string{st})
+    } else {
+        rows = sqlite_query(db, sel + " AND o.channel=? ORDER BY c.name", []string{st, ch})
+    }
+    sqlite_close(db)
+    say("{\"ok\":true,\"campaign\":" + rows + "}")
+}
+
+// crm sent <outreach-id>  -> mark an outreach sent, log the touch, advance the contact to contacted.
+func cmd_sent(db, a) {
+    if len(a) < 3 { die(80, "usage: crm sent <outreach-id>") }
+    oid := a[2]
+    rows := sqlite_query(db, "SELECT id, contact_id, channel, subject, body, status, created, sent_at FROM outreach WHERE id=? LIMIT 1", []string{oid})
+    os := parse(rows, []Outreach{})
+    if len(os) == 0 { die(90, "no such outreach: " + esc(oid)) }
+    o := os[0]
+    n := now()
+    sqlite_exec(db, "UPDATE outreach SET status='sent', sent_at=? WHERE id=?", []string{str(n), oid})
+    sqlite_exec(db, "INSERT INTO events(id,contact_id,channel,direction,summary,ref,ts) VALUES(?,?,?,?,?,?,?)", []string{nid(), o.contact_id, o.channel, "out", "sent: " + o.subject, oid, str(n)})
+    sqlite_exec(db, "UPDATE contacts SET stage='contacted', next_action='', next_due='', updated=? WHERE id=? AND stage='new'", []string{str(n), o.contact_id})
+    sqlite_close(db)
+    say("{\"ok\":true,\"sent\":\"" + esc(oid) + "\",\"channel\":\"" + esc(o.channel) + "\"}")
 }
 
 func main() {
@@ -447,6 +542,10 @@ func main() {
     if cmd == "due" { cmd_due(db); return }
     if cmd == "pipeline" { cmd_pipeline(db); return }
     if cmd == "ingest" { cmd_ingest(db, a); return }
+    if cmd == "queue" { cmd_queue(db, a); return }
+    if cmd == "queue-bulk" { cmd_queue_bulk(db, a); return }
+    if cmd == "campaign" { cmd_campaign(db, a); return }
+    if cmd == "sent" { cmd_sent(db, a); return }
     sqlite_close(db)
     write(2, "{\"ok\":false,\"error\":\"unknown command: " + esc(cmd) + "\"}\n")
     exit(80)

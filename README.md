@@ -25,9 +25,25 @@ crm list [--stage X]
 crm due                       # next steps due today / overdue
 crm pipeline                  # counts by stage
 crm ingest '<json>'           # bulk upsert from grepapi leads (the sink)
+crm queue <contact> <email|phone> [--subject --body]   # stage one outreach
+crm queue-bulk '<json>'       # load a whole channel-routed campaign (array of {contact,channel,subject,body})
+crm campaign [--channel email|phone] [--status queued|sent]   # the staged campaign as JSON
+crm sent <outreach-id>        # mark sent + log the touch + advance the contact to contacted
 ```
 `<contact>` resolves by id, exact email, or a name/company substring. DB at `$CRM_DB`
 (default `~/.crm-cli.db`).
+
+## Campaigns live in the CRM (`queue` → `campaign` → `sent`)
+The CRM owns the outbound campaign, not a scratch file. Route by channel at load time
+(cold-mail if the lead has an email, phone otherwise), then the send glue reads it:
+```
+crm queue-bulk '[{"contact":"a@b.fr","channel":"email","subject":"…","body":"…"}, …]'
+crm campaign --channel email   # → Resend batch reads {to:email, subject, body}
+crm campaign --channel phone   # → bland/manual reads {phone, body:script}
+crm sent <id>                  # after each send: marks sent, logs a touch, stage→contacted
+```
+`crm serve` then auto-logs opens/bounces/replies from the Resend webhook — so a campaign
+goes queued → sent → replied without leaving the CRM.
 
 ## Webhook sink — `crm serve` (auto-log replies, opens, bounces)
 crm-cli can receive **Resend webhooks** and update itself, so even *inbound* signals log with
