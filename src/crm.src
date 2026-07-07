@@ -94,6 +94,16 @@ func flagv(a, name, dflt) (v) {
     }
 }
 
+// boolean flag: is "--name" present in the args?
+func has_flag(a, name) (b) {
+    b = 0
+    i := 0
+    for i < len(a) {
+        if a[i] == name { b = 1 }
+        i = i + 1
+    }
+}
+
 // resolve a contact by id, exact email, or a name/company substring (most-recent wins)
 func resolve(db, q) (id) {
     id = ""
@@ -496,17 +506,60 @@ func cmd_queue_bulk(db, a) {
 
 // crm campaign [--channel email|phone] [--status queued|sent]  -> the staged campaign as JSON,
 // each row joined with its contact — exactly what a Resend batch / bland caller consumes.
+// Camprow is a campaign row joined with its contact — for --jsonl send-payload emit.
+type Camprow struct {
+    id string
+    channel string
+    subject string
+    body string
+    status string
+    company string
+    email string
+    phone string
+}
+
+// crm campaign [--channel email|phone] [--status queued|sent] [--summary | --jsonl]
+//   default   -> {"ok":true,"campaign":[ …joined rows… ]}  (digestible JSON)
+//   --summary -> a digest: counts by channel × status (glance before acting)
+//   --jsonl   -> one SEND-READY payload per line: email {to,subject,body,outreach},
+//                phone {phone,script,company,outreach} — pipe straight into a Resend
+//                batch / bland caller / any glue, or `> batch.jsonl` to backfill a file.
 func cmd_campaign(db, a) {
     ch := flagv(a, "--channel", "")
     st := flagv(a, "--status", "queued")
-    rows := ""
+
+    if has_flag(a, "--summary") == 1 {
+        rows := sqlite_query(db, "SELECT channel, status, COUNT(*) AS n FROM outreach GROUP BY channel, status ORDER BY status, channel", []string{})
+        sqlite_close(db)
+        say("{\"ok\":true,\"summary\":" + rows + "}")
+        return
+    }
+
     sel := "SELECT o.id, o.channel, o.subject, o.body, o.status, c.name AS company, c.email, c.phone FROM outreach o JOIN contacts c ON c.id=o.contact_id WHERE o.status=?"
+    order := " ORDER BY o.channel, c.name"
+    rows := ""
     if ch == "" {
-        rows = sqlite_query(db, sel + " ORDER BY o.channel, c.name", []string{st})
+        rows = sqlite_query(db, sel + order, []string{st})
     } else {
-        rows = sqlite_query(db, sel + " AND o.channel=? ORDER BY c.name", []string{st, ch})
+        rows = sqlite_query(db, sel + " AND o.channel=?" + order, []string{st, ch})
     }
     sqlite_close(db)
+
+    if has_flag(a, "--jsonl") == 1 {
+        cs := parse(rows, []Camprow{})
+        i := 0
+        for i < len(cs) {
+            c := cs[i]
+            if c.channel == "phone" {
+                say("{\"phone\":\"" + esc(c.phone) + "\",\"company\":\"" + esc(c.company) + "\",\"script\":\"" + esc(c.body) + "\",\"outreach\":\"" + esc(c.id) + "\"}")
+            } else {
+                say("{\"to\":\"" + esc(c.email) + "\",\"subject\":\"" + esc(c.subject) + "\",\"body\":\"" + esc(c.body) + "\",\"outreach\":\"" + esc(c.id) + "\"}")
+            }
+            i = i + 1
+        }
+        return
+    }
+
     say("{\"ok\":true,\"campaign\":" + rows + "}")
 }
 

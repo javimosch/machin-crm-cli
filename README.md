@@ -33,17 +33,23 @@ crm sent <outreach-id>        # mark sent + log the touch + advance the contact 
 `<contact>` resolves by id, exact email, or a name/company substring. DB at `$CRM_DB`
 (default `~/.crm-cli.db`).
 
-## Campaigns live in the CRM (`queue` → `campaign` → `sent`)
+## Campaigns live in the CRM (`queue` → read → `sent`)
 The CRM owns the outbound campaign, not a scratch file. Route by channel at load time
-(cold-mail if the lead has an email, phone otherwise), then the send glue reads it:
+(cold-mail if the lead has an email, phone otherwise); then an operator/agent **reads it back**
+three ways — digest, structured, or send-ready — and any glue (grepapi/bland/Resend) sends from it:
 ```
-crm queue-bulk '[{"contact":"a@b.fr","channel":"email","subject":"…","body":"…"}, …]'
-crm campaign --channel email   # → Resend batch reads {to:email, subject, body}
-crm campaign --channel phone   # → bland/manual reads {phone, body:script}
-crm sent <id>                  # after each send: marks sent, logs a touch, stage→contacted
+crm queue-bulk '[{"contact":"a@b.fr","channel":"email","subject":"…","body":"…"}, …]'   # load
+
+crm campaign --summary                     # DIGEST: counts by channel × status, at a glance
+crm campaign [--channel email|phone]       # STRUCTURED: full rows joined w/ contact (JSON)
+crm campaign --channel email --jsonl       # SEND-READY: one payload/line → {to,subject,body,outreach}
+crm campaign --channel phone --jsonl       #            → {phone,company,script,outreach}
+
+crm sent <outreach-id>                     # after each send: marks sent, logs a touch, stage→contacted
 ```
-`crm serve` then auto-logs opens/bounces/replies from the Resend webhook — so a campaign
-goes queued → sent → replied without leaving the CRM.
+`--jsonl` is the send-glue contract: pipe it straight into a Resend batch / bland caller, or
+`> batch.jsonl` to backfill a file. `crm serve` then auto-logs opens/bounces/replies from the
+Resend webhook — so a campaign goes queued → sent → replied without leaving the CRM.
 
 ## Webhook sink — `crm serve` (auto-log replies, opens, bounces)
 crm-cli can receive **Resend webhooks** and update itself, so even *inbound* signals log with
