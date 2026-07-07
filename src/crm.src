@@ -80,6 +80,10 @@ func esc(s) (o) {
 
 func say(s) { write(1, s + "\n") }
 
+// Bumped per release; the released binary reports it via `crm version`, and it's what
+// `crm update` compares against. Keep in lockstep with the git tag.
+func version_str() (v) { v = "0.1.0" }
+
 func die(code, msg) {
     write(2, "{\"ok\":false,\"error\":\"" + esc(msg) + "\"}\n")
     exit(code)
@@ -506,8 +510,23 @@ func cmd_serve(a) {
     })
 }
 
+// crm version  -> the embedded release version (agent- and human-readable).
+func cmd_version() {
+    say("{\"ok\":true,\"name\":\"crm-cli\",\"version\":\"" + version_str() + "\"}")
+}
+
+// crm update  -> re-run the official installer, which downloads the latest prebuilt release
+// (falling back to build-from-source) and atomically replaces this binary in place. Streams
+// progress. Honors CRM_BIN_DIR so it updates wherever this copy was installed.
+func cmd_update() {
+    say("{\"ok\":true,\"action\":\"update\",\"from\":\"" + version_str() + "\",\"note\":\"fetching the latest release…\"}")
+    code := system("curl -fsSL https://raw.githubusercontent.com/javimosch/machin-crm-cli/master/install.sh | sh")
+    if code != 0 { die(100, "update failed (installer exit " + str(code) + ") — check network, or reinstall from crmd.intrane.fr") }
+    say("{\"ok\":true,\"updated\":true,\"hint\":\"run: crm version\"}")
+}
+
 func cmd_help() {
-    say("{\"ok\":true,\"name\":\"crm-cli\",\"tagline\":\"the agent-first CRM — sink for the outreach machine\",\"db\":\"$CRM_DB or ~/.crm-cli.db\",\"commands\":{\"add\":\"add <name> [--company --email --phone --source --stage]\",\"log\":\"log <contact> <channel> <summary> [--ref --direction]\",\"stage\":\"stage <contact> <new|contacted|replied|meeting|deal|won|lost>\",\"next\":\"next <contact> <action> [--due YYYY-MM-DD|+N days]\",\"show\":\"show <contact>\",\"list\":\"list [--stage X]\",\"due\":\"due (next steps due today/overdue)\",\"pipeline\":\"pipeline (counts by stage)\",\"ingest\":\"ingest '<json>' (bulk from grepapi leads)\",\"queue\":\"queue <contact> <email|phone> [--subject --body] (stage one outreach)\",\"queue-bulk\":\"queue-bulk '<json [{contact,channel,subject,body}]>' (load a campaign)\",\"campaign\":\"campaign [--channel email|phone] [--status queued|sent] (the staged campaign as JSON)\",\"sent\":\"sent <outreach-id> (mark sent + log touch + advance stage)\",\"send\":\"send [--limit N] (drip-send queued EMAIL outreach via SMTP; needs SMTP_* env; suppression + footer + stage advance)\",\"call\":\"call [--limit N] (drip-dispatch queued PHONE outreach as AI cold-calls via Bland; needs BLAND_API_KEY; outcomes return via serve POST /bland)\",\"suppress\":\"suppress <email|phone> [reason] (never contact again; alias unsub/dnc)\",\"serve\":\"serve [port] (webhook sink: POST /resend email events + POST /bland call outcomes -> the CRM; bounces/complaints auto-suppress)\"}}")
+    say("{\"ok\":true,\"name\":\"crm-cli\",\"version\":\"" + version_str() + "\",\"tagline\":\"the agent-first CRM — sink for the outreach machine\",\"db\":\"$CRM_DB or ~/.crm-cli.db\",\"commands\":{\"add\":\"add <name> [--company --email --phone --source --stage]\",\"log\":\"log <contact> <channel> <summary> [--ref --direction]\",\"stage\":\"stage <contact> <new|contacted|replied|meeting|deal|won|lost>\",\"next\":\"next <contact> <action> [--due YYYY-MM-DD|+N days]\",\"show\":\"show <contact>\",\"list\":\"list [--stage X]\",\"due\":\"due (next steps due today/overdue)\",\"pipeline\":\"pipeline (counts by stage)\",\"ingest\":\"ingest '<json>' (bulk from grepapi leads)\",\"queue\":\"queue <contact> <email|phone> [--subject --body] (stage one outreach)\",\"queue-bulk\":\"queue-bulk '<json [{contact,channel,subject,body}]>' (load a campaign)\",\"campaign\":\"campaign [--channel email|phone] [--status queued|sent] (the staged campaign as JSON)\",\"sent\":\"sent <outreach-id> (mark sent + log touch + advance stage)\",\"send\":\"send [--limit N] (drip-send queued EMAIL outreach via SMTP; needs SMTP_* env; suppression + footer + stage advance)\",\"call\":\"call [--limit N] (drip-dispatch queued PHONE outreach as AI cold-calls via Bland; needs BLAND_API_KEY; outcomes return via serve POST /bland)\",\"suppress\":\"suppress <email|phone> [reason] (never contact again; alias unsub/dnc)\",\"serve\":\"serve [port] (webhook sink: POST /resend email events + POST /bland call outcomes -> the CRM; bounces/complaints auto-suppress)\",\"version\":\"version (the installed release)\",\"update\":\"update (self-update to the latest release)\"}}")
 }
 
 // crm queue <contact> <channel> [--subject X --body X]  -> stage one outreach message.
@@ -817,6 +836,8 @@ func main() {
     cmd := ""
     if len(a) >= 2 { cmd = a[1] }
     if cmd == "" || cmd == "help" { cmd_help(); return }
+    if cmd == "version" || cmd == "--version" || cmd == "-v" { cmd_version(); return }
+    if cmd == "update" || cmd == "selfupdate" { cmd_update(); return }
     if cmd == "serve" { cmd_serve(a); return }
     db := opendb()
     if cmd == "add" { cmd_add(db, a); return }
