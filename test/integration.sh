@@ -57,6 +57,101 @@ $CRM queue e@z.com email --subject S --body B >/dev/null
 $CRM suppress e@z.com bounce >/dev/null
 ok "suppress cancels queued outreach" suppressed "$(q "SELECT status FROM outreach WHERE contact_id=(SELECT id FROM contacts WHERE email='e@z.com')")"
 ok "suppress records the address"     1 "$(q "SELECT COUNT(*) FROM suppress WHERE addr='e@z.com'")"
+ok "suppress(email) leaves no phantom '+' row" 0 "$(q "SELECT COUNT(*) FROM suppress WHERE addr='+'")"
+
+# =====================  SAFETY RAILS: crm undo  =====================
+
+# --- undo reverts a stage change --------------------------------------------
+$CRM add Fi --email fi@z.com >/dev/null
+$CRM stage fi@z.com meeting >/dev/null
+ok "stage set before undo"    meeting "$($CRM show fi@z.com | jq -r '.contact[0].stage')"
+$CRM undo >/dev/null
+ok "undo reverts stage"       new     "$($CRM show fi@z.com | jq -r '.contact[0].stage')"
+
+# --- undo reverts `next` --------------------------------------------------
+$CRM next fi@z.com "call back" --due "+4 days" >/dev/null
+ok "next set before undo"    1 "$([ -n "$($CRM show fi@z.com | jq -r '.contact[0].next_action')" ] && echo 1 || echo 0)"
+$CRM undo >/dev/null
+ok "undo reverts next_action" "" "$($CRM show fi@z.com | jq -r '.contact[0].next_action')"
+
+# --- undo reverts `sent`: outreach status, the logged touch, and the stage flip
+$CRM add Gi --email gi@z.com >/dev/null   # stage=new
+$CRM queue gi@z.com email --subject SS --body BB >/dev/null
+OID2=$($CRM campaign --channel email --status queued | jq -r '.campaign[]|select(.email=="gi@z.com").id')
+EVBEFORE=$(q "SELECT COUNT(*) FROM events")
+$CRM sent "$OID2" >/dev/null
+ok "sent -> outreach status sent" sent      "$(q "SELECT status FROM outreach WHERE id='$OID2'")"
+ok "sent -> stage contacted"      contacted "$($CRM show gi@z.com | jq -r '.contact[0].stage')"
+$CRM undo >/dev/null
+ok "undo reverts outreach status" queued "$(q "SELECT status FROM outreach WHERE id='$OID2'")"
+ok "undo reverts stage"           new    "$($CRM show gi@z.com | jq -r '.contact[0].stage')"
+ok "undo removes the logged touch" "$EVBEFORE" "$(q "SELECT COUNT(*) FROM events")"
+
+# --- undo reverts suppress: un-suppresses + restores the cancelled outreach -
+$CRM add Hi --email hi@z.com >/dev/null
+$CRM queue hi@z.com email --subject S --body B >/dev/null
+$CRM suppress hi@z.com bounce >/dev/null
+$CRM undo >/dev/null
+ok "undo un-suppresses"           0 "$(q "SELECT COUNT(*) FROM suppress WHERE addr='hi@z.com'")"
+ok "undo restores cancelled outreach to queued" queued "$(q "SELECT status FROM outreach WHERE contact_id=(SELECT id FROM contacts WHERE email='hi@z.com')")"
+
+# --- an idempotent (already-suppressed) suppress call records NO new op, so a
+# single undo reaches back to the ORIGINAL suppress, fully reverting it -------
+$CRM add Ji --email ji@z.com >/dev/null
+$CRM suppress ji@z.com r1 >/dev/null
+$CRM suppress ji@z.com r2 >/dev/null   # no-op: already suppressed, nothing new to record
+$CRM undo >/dev/null
+ok "idempotent re-suppress -> one undo fully reverts" 0 "$(q "SELECT COUNT(*) FROM suppress WHERE addr='ji@z.com'")"
+
+# --- two DISTINCT suppress ops are independent: one undo reverts only the LAST
+$CRM add Ki --email ki@z.com >/dev/null
+$CRM suppress ki@z.com r1 >/dev/null
+$CRM add Li --email li@z.com >/dev/null
+$CRM suppress li@z.com r2 >/dev/null
+$CRM undo >/dev/null
+ok "LIFO: earlier distinct op untouched" 1 "$(q "SELECT COUNT(*) FROM suppress WHERE addr='ki@z.com'")"
+ok "LIFO: latest distinct op reverted"   0 "$(q "SELECT COUNT(*) FROM suppress WHERE addr='li@z.com'")"
+
+# --- undo --n 2 reverts two ops in one call ---------------------------------
+$CRM add Mi --email mi@z.com >/dev/null
+$CRM stage mi@z.com meeting >/dev/null
+$CRM stage mi@z.com deal >/dev/null
+$CRM undo --n 2 >/dev/null
+ok "undo --n 2 reverts both" new "$($CRM show mi@z.com | jq -r '.contact[0].stage')"
+
+# --- undo with nothing to undo is a clean no-op (forced-empty trail: other
+# earlier ops in this script are deliberately left un-undone as independence
+# checks, so the trail isn't naturally empty here) --------------------------
+q "DELETE FROM audit"
+r=$($CRM undo)
+ok "undo with empty trail -> undone:0" 0 "$(jq -r .undone <<<"$r")"
+
+# =====================  SAFETY RAILS: send/call --dry-run  =====================
+
+# --- send --dry-run needs no SMTP env, touches no network, changes no DB ----
+unset SMTP_HOST SMTP_FROM SMTP_PORT SMTP_USER SMTP_PASS
+$CRM add Ni --email ni@z.com >/dev/null
+$CRM queue ni@z.com email --subject DrySubj --body DryBody >/dev/null
+r=$($CRM send --dry-run)
+ok "send --dry-run reports dry_run"       true "$(jq -r .dry_run <<<"$r")"
+ok "send --dry-run includes the new item" send "$(jq -r '.preview[]|select(.to=="ni@z.com").action' <<<"$r")"
+ok "send --dry-run leaves it queued"      queued "$(q "SELECT status FROM outreach WHERE contact_id=(SELECT id FROM contacts WHERE email='ni@z.com')")"
+
+# --- send --dry-run correctly flags a suppressed recipient as skipped ------
+$CRM add Oi --email oi@z.com >/dev/null
+$CRM suppress oi@z.com premarked >/dev/null
+$CRM queue oi@z.com email --subject S --body B >/dev/null
+r=$($CRM send --dry-run)
+ok "send --dry-run flags suppressed" skip_suppressed "$(jq -r '.preview[]|select(.to=="oi@z.com").action' <<<"$r")"
+
+# --- call --dry-run needs no BLAND_API_KEY, normalizes to E.164, no dial ----
+unset BLAND_API_KEY BLAND_URL
+$CRM add Pi --phone "09 80 80 80 35" >/dev/null
+$CRM queue Pi phone --body "ring ring" >/dev/null
+r=$($CRM call --dry-run)
+ok "call --dry-run reports dry_run"    true          "$(jq -r .dry_run <<<"$r")"
+ok "call --dry-run normalizes E.164"   +33980808035  "$(jq -r '.preview[]|select(.company=="Pi").to' <<<"$r")"
+ok "call --dry-run leaves it queued"   queued        "$(q "SELECT status FROM outreach WHERE contact_id=(SELECT id FROM contacts WHERE phone='09 80 80 80 35')")"
 
 # --- followups selection rules ---------------------------------------------
 # a due candidate: contacted, an outbound email aged >N days, no reply, nothing queued

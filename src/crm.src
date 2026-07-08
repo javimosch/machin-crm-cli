@@ -29,6 +29,18 @@ type Event struct {
 }
 
 type Duerow struct { d string }
+type Idrow struct { id string }
+type Opidrow struct { op_id string }
+type Auditrow struct {
+    id string
+    op_id string
+    ts int
+    cmd string
+    tbl string
+    row_id string
+    action string
+    before string
+}
 
 // Qitem is one prepared outreach in a bulk campaign load (crm queue-bulk).
 type Qitem struct {
@@ -66,6 +78,41 @@ func opendb() (db) {
     sqlite_exec(db, "ALTER TABLE outreach ADD COLUMN error TEXT DEFAULT ''", []string{})   // no-op once it exists
     // suppression list: addresses never emailed again (manual unsub or a bounce/complaint from serve).
     sqlite_exec(db, "CREATE TABLE IF NOT EXISTS suppress(addr TEXT PRIMARY KEY, reason TEXT, ts INTEGER)", []string{})
+    // audit trail for `crm undo`: one row per table-row a mutating command touched, grouped by
+    // op_id (all rows from one command invocation). `before` is a full pre-mutation snapshot
+    // (an "insert" action has no before — undo just deletes the row). Only wired for stage/
+    // next/sent/suppress — see cmd_undo.
+    sqlite_exec(db, "CREATE TABLE IF NOT EXISTS audit(id TEXT PRIMARY KEY, op_id TEXT, ts INTEGER, cmd TEXT, tbl TEXT, row_id TEXT, action TEXT, before TEXT)", []string{})
+}
+
+// snap_contact / snap_outreach — a raw one-row JSON array snapshot for the audit trail
+// (read back via jget(before, "[0].<col>") in undo_contact/undo_outreach).
+func snap_contact(db, id) (j) {
+    j = sqlite_query(db, "SELECT id, name, company, email, phone, source, stage, next_action, next_due, created, updated FROM contacts WHERE id=?", []string{id})
+}
+func snap_outreach(db, id) (j) {
+    j = sqlite_query(db, "SELECT id, contact_id, channel, subject, body, status, created, sent_at, error FROM outreach WHERE id=?", []string{id})
+}
+
+func audit_add(db, op_id, cmd, tbl, row_id, action, before) {
+    sqlite_exec(db, "INSERT INTO audit(id,op_id,ts,cmd,tbl,row_id,action,before) VALUES(?,?,?,?,?,?,?,?)", []string{nid(), op_id, str(now()), cmd, tbl, row_id, action, before})
+}
+
+// undo_contact / undo_outreach — restore a row from its audit snapshot. No-op (returns 0) if
+// the snapshot is empty (row didn't exist pre-mutation — shouldn't happen for update actions).
+func undo_contact(db, id, before) (ok) {
+    ok = 0
+    if before == "" || before == "[]" { return ok }
+    sqlite_exec(db, "UPDATE contacts SET name=?,company=?,email=?,phone=?,source=?,stage=?,next_action=?,next_due=?,updated=? WHERE id=?",
+        []string{jget(before, "[0].name"), jget(before, "[0].company"), jget(before, "[0].email"), jget(before, "[0].phone"), jget(before, "[0].source"), jget(before, "[0].stage"), jget(before, "[0].next_action"), jget(before, "[0].next_due"), jget(before, "[0].updated"), id})
+    ok = 1
+}
+func undo_outreach(db, id, before) (ok) {
+    ok = 0
+    if before == "" || before == "[]" { return ok }
+    sqlite_exec(db, "UPDATE outreach SET subject=?,body=?,status=?,sent_at=?,error=? WHERE id=?",
+        []string{jget(before, "[0].subject"), jget(before, "[0].body"), jget(before, "[0].status"), jget(before, "[0].sent_at"), jget(before, "[0].error"), id})
+    ok = 1
 }
 
 func nid() (s) { s = to_hex(rand_bytes(8)) }
@@ -152,23 +199,27 @@ func cmd_log(db, a) {
     say("{\"ok\":true,\"event\":\"" + eid + "\",\"contact\":\"" + cid + "\",\"channel\":\"" + esc(a[3]) + "\"}")
 }
 
-// crm stage <contact> <stage>
+// crm stage <contact> <stage>  -- undoable (crm undo)
 func cmd_stage(db, a) {
     if len(a) < 4 { die(80, "usage: crm stage <contact> <new|contacted|replied|meeting|deal|won|lost>") }
     cid := resolve(db, a[2])
     if cid == "" { die(90, "no contact matching: " + a[2]) }
+    before := snap_contact(db, cid)
     sqlite_exec(db, "UPDATE contacts SET stage=?, updated=? WHERE id=?", []string{a[3], str(now()), cid})
+    audit_add(db, nid(), "stage", "contacts", cid, "update", before)
     sqlite_close(db)
     say("{\"ok\":true,\"contact\":\"" + cid + "\",\"stage\":\"" + esc(a[3]) + "\"}")
 }
 
-// crm next <contact> <action> [--due <YYYY-MM-DD | +N days>]
+// crm next <contact> <action> [--due <YYYY-MM-DD | +N days>]  -- undoable (crm undo)
 func cmd_next(db, a) {
     if len(a) < 4 { die(80, "usage: crm next <contact> <action> [--due 2026-07-08 | --due \"+4 days\"]") }
     cid := resolve(db, a[2])
     if cid == "" { die(90, "no contact matching: " + a[2]) }
     due := resolve_due(db, flagv(a, "--due", ""))
+    before := snap_contact(db, cid)
     sqlite_exec(db, "UPDATE contacts SET next_action=?, next_due=?, updated=? WHERE id=?", []string{a[3], due, str(now()), cid})
+    audit_add(db, nid(), "next", "contacts", cid, "update", before)
     sqlite_close(db)
     say("{\"ok\":true,\"contact\":\"" + cid + "\",\"next_action\":\"" + esc(a[3]) + "\",\"next_due\":\"" + esc(due) + "\"}")
 }
@@ -496,7 +547,7 @@ func cmd_update() {
 }
 
 func cmd_help() {
-    say("{\"ok\":true,\"name\":\"crm-cli\",\"version\":\"" + version_str() + "\",\"tagline\":\"the agent-first CRM — sink for the outreach machine\",\"db\":\"$CRM_DB or ~/.crm-cli.db\",\"commands\":{\"add\":\"add <name> [--company --email --phone --source --stage]\",\"log\":\"log <contact> <channel> <summary> [--ref --direction]\",\"stage\":\"stage <contact> <new|contacted|replied|meeting|deal|won|lost>\",\"next\":\"next <contact> <action> [--due YYYY-MM-DD|+N days]\",\"show\":\"show <contact>\",\"list\":\"list [--stage X]\",\"due\":\"due (next steps due today/overdue)\",\"pipeline\":\"pipeline (counts by stage)\",\"ingest\":\"ingest '<json>' (bulk from grepapi leads)\",\"queue\":\"queue <contact> <email|phone> [--subject --body] (stage one outreach)\",\"queue-bulk\":\"queue-bulk '<json [{contact,channel,subject,body}]>' (load a campaign)\",\"campaign\":\"campaign [--channel email|phone] [--status queued|sent] (the staged campaign as JSON)\",\"followups\":\"followups [--days 3 --max-touches 3 --limit 200] [--queue --subject S --body B] (who is due a bump; --queue stages wave 2, {{name}}/{{company}} substituted)\",\"sent\":\"sent <outreach-id> (mark sent + log touch + advance stage)\",\"send\":\"send [--limit N] (drip-send queued EMAIL outreach via SMTP; needs SMTP_* env; suppression + footer + stage advance)\",\"call\":\"call [--limit N] (drip-dispatch queued PHONE outreach as AI cold-calls via Bland; needs BLAND_API_KEY; outcomes return via serve POST /bland)\",\"suppress\":\"suppress <email|phone> [reason] (never contact again; alias unsub/dnc)\",\"serve\":\"serve [port] (webhook sink: POST /resend email events + POST /bland call outcomes -> the CRM; bounces/complaints auto-suppress)\",\"version\":\"version (the installed release)\",\"update\":\"update (self-update to the latest release)\"}}")
+    say("{\"ok\":true,\"name\":\"crm-cli\",\"version\":\"" + version_str() + "\",\"tagline\":\"the agent-first CRM — sink for the outreach machine\",\"db\":\"$CRM_DB or ~/.crm-cli.db\",\"commands\":{\"add\":\"add <name> [--company --email --phone --source --stage]\",\"log\":\"log <contact> <channel> <summary> [--ref --direction]\",\"stage\":\"stage <contact> <new|contacted|replied|meeting|deal|won|lost>\",\"next\":\"next <contact> <action> [--due YYYY-MM-DD|+N days]\",\"show\":\"show <contact>\",\"list\":\"list [--stage X]\",\"due\":\"due (next steps due today/overdue)\",\"pipeline\":\"pipeline (counts by stage)\",\"ingest\":\"ingest '<json>' (bulk from grepapi leads)\",\"queue\":\"queue <contact> <email|phone> [--subject --body] (stage one outreach)\",\"queue-bulk\":\"queue-bulk '<json [{contact,channel,subject,body}]>' (load a campaign)\",\"campaign\":\"campaign [--channel email|phone] [--status queued|sent] (the staged campaign as JSON)\",\"followups\":\"followups [--days 3 --max-touches 3 --limit 200] [--queue --subject S --body B] (who is due a bump; --queue stages wave 2, {{name}}/{{company}} substituted)\",\"sent\":\"sent <outreach-id> (mark sent + log touch + advance stage)\",\"send\":\"send [--limit N] [--dry-run] (drip-send queued EMAIL outreach via SMTP; needs SMTP_* env; suppression + footer + stage advance; --dry-run previews with no creds/network/DB writes)\",\"call\":\"call [--limit N] [--dry-run] (drip-dispatch queued PHONE outreach as AI cold-calls via Bland; needs BLAND_API_KEY; outcomes return via serve POST /bland; --dry-run previews with no key/network/DB writes)\",\"suppress\":\"suppress <email|phone> [reason] (never contact again; alias unsub/dnc; undoable)\",\"undo\":\"undo [--n N] (revert the last N stage/next/sent/suppress operations, LIFO; send/call are NOT undoable — an email/call already left)\",\"serve\":\"serve [port] (webhook sink: POST /resend email events + POST /bland call outcomes -> the CRM; bounces/complaints auto-suppress)\",\"version\":\"version (the installed release)\",\"update\":\"update (self-update to the latest release)\"}}")
 }
 
 // crm queue <contact> <channel> [--subject X --body X]  -> stage one outreach message.
@@ -652,6 +703,8 @@ func cmd_followups(db, a) {
 }
 
 // crm sent <outreach-id>  -> mark an outreach sent, log the touch, advance the contact to contacted.
+// crm sent <outreach-id>  -- undoable (crm undo): reverts the outreach status, removes the
+// touch it logged, and restores the contact's prior stage/next_action/next_due.
 func cmd_sent(db, a) {
     if len(a) < 3 { die(80, "usage: crm sent <outreach-id>") }
     oid := a[2]
@@ -660,9 +713,16 @@ func cmd_sent(db, a) {
     if len(os) == 0 { die(90, "no such outreach: " + esc(oid)) }
     o := os[0]
     n := now()
+    op := nid()
+    before_o := snap_outreach(db, oid)
     sqlite_exec(db, "UPDATE outreach SET status='sent', sent_at=? WHERE id=?", []string{str(n), oid})
-    sqlite_exec(db, "INSERT INTO events(id,contact_id,channel,direction,summary,ref,ts) VALUES(?,?,?,?,?,?,?)", []string{nid(), o.contact_id, o.channel, "out", "sent: " + o.subject, oid, str(n)})
+    audit_add(db, op, "sent", "outreach", oid, "update", before_o)
+    eid := nid()
+    sqlite_exec(db, "INSERT INTO events(id,contact_id,channel,direction,summary,ref,ts) VALUES(?,?,?,?,?,?,?)", []string{eid, o.contact_id, o.channel, "out", "sent: " + o.subject, oid, str(n)})
+    audit_add(db, op, "sent", "events", eid, "insert", "")
+    before_c := snap_contact(db, o.contact_id)
     sqlite_exec(db, "UPDATE contacts SET stage='contacted', next_action='', next_due='', updated=? WHERE id=? AND stage='new'", []string{str(n), o.contact_id})
+    audit_add(db, op, "sent", "contacts", o.contact_id, "update", before_c)
     sqlite_close(db)
     say("{\"ok\":true,\"sent\":\"" + esc(oid) + "\",\"channel\":\"" + esc(o.channel) + "\"}")
 }
@@ -702,6 +762,32 @@ func mail_footer() (f) {
 // --jsonl) to bland-cli, not sent here. Config: SMTP_HOST SMTP_PORT SMTP_FROM SMTP_USER
 // SMTP_PASS SMTP_TLS (point at smtp.resend.com:587, user 'resend', pass = API key).
 func cmd_send(db, a) {
+    limit := flagv(a, "--limit", "20")
+    rows := sqlite_query(db, "SELECT o.id AS oid, o.contact_id AS cid, c.email AS email, o.subject AS subject, o.body AS body FROM outreach o JOIN contacts c ON c.id=o.contact_id WHERE o.status='queued' AND o.channel='email' AND c.email!='' ORDER BY o.created LIMIT " + limit, []string{})
+    todo := parse(rows, []Sendrow{})
+
+    // --dry-run: compose the preview (incl. the suppression check) without SMTP creds, a
+    // network call, or touching the DB — nothing here can send an email.
+    if has_flag(a, "--dry-run") == 1 {
+        preview := "["
+        would := 0
+        skip := 0
+        i := 0
+        for i < len(todo) {
+            m := todo[i]
+            srows := sqlite_query(db, "SELECT addr FROM suppress WHERE addr=?", []string{to_lower(m.email)})
+            action := "send"
+            if srows != "[]" { action = "skip_suppressed"; skip = skip + 1 } else { would = would + 1 }
+            if i > 0 { preview = preview + "," }
+            preview = preview + "{\"to\":\"" + esc(m.email) + "\",\"subject\":\"" + esc(m.subject) + "\",\"action\":\"" + action + "\"}"
+            i = i + 1
+        }
+        preview = preview + "]"
+        sqlite_close(db)
+        say("{\"ok\":true,\"dry_run\":true,\"would_send\":" + str(would) + ",\"would_skip\":" + str(skip) + ",\"preview\":" + preview + "}")
+        return
+    }
+
     host := env("SMTP_HOST")
     from := env("SMTP_FROM")
     if host == "" || from == "" {
@@ -712,10 +798,6 @@ func cmd_send(db, a) {
     if port == 0 { port = 587 }
     use_tls := 1
     if env("SMTP_TLS") == "0" { use_tls = 0 }
-    limit := flagv(a, "--limit", "20")
-
-    rows := sqlite_query(db, "SELECT o.id AS oid, o.contact_id AS cid, c.email AS email, o.subject AS subject, o.body AS body FROM outreach o JOIN contacts c ON c.id=o.contact_id WHERE o.status='queued' AND o.channel='email' AND c.email!='' ORDER BY o.created LIMIT " + limit, []string{})
-    todo := parse(rows, []Sendrow{})
     sent := 0
     failed := 0
     supp := 0
@@ -759,17 +841,40 @@ func cmd_send(db, a) {
 // `crm serve` (POST /bland). Config: BLAND_API_KEY (required), CRM_CALL_WEBHOOK (public
 // /bland URL for outcomes), BLAND_VOICE, BLAND_LANG, CRM_COUNTRY_CODE (default 33).
 func cmd_call(db, a) {
+    limit := flagv(a, "--limit", "20")
+    rows := sqlite_query(db, "SELECT o.id AS oid, o.contact_id AS cid, c.phone AS phone, c.name AS company, o.body AS body FROM outreach o JOIN contacts c ON c.id=o.contact_id WHERE o.status='queued' AND o.channel='phone' AND c.phone!='' ORDER BY o.created LIMIT " + limit, []string{})
+    todo := parse(rows, []Callrow{})
+
+    // --dry-run: compose the E.164 + suppression preview without a Bland key or any dial.
+    if has_flag(a, "--dry-run") == 1 {
+        preview := "["
+        would := 0
+        skip := 0
+        i := 0
+        for i < len(todo) {
+            m := todo[i]
+            num := e164(m.phone)
+            srows := sqlite_query(db, "SELECT addr FROM suppress WHERE addr=? OR addr=?", []string{num, m.phone})
+            action := "call"
+            if srows != "[]" { action = "skip_suppressed"; skip = skip + 1 } else { would = would + 1 }
+            if i > 0 { preview = preview + "," }
+            preview = preview + "{\"to\":\"" + esc(num) + "\",\"company\":\"" + esc(m.company) + "\",\"action\":\"" + action + "\"}"
+            i = i + 1
+        }
+        preview = preview + "]"
+        sqlite_close(db)
+        say("{\"ok\":true,\"dry_run\":true,\"would_call\":" + str(would) + ",\"would_skip\":" + str(skip) + ",\"preview\":" + preview + "}")
+        return
+    }
+
     key := env("BLAND_API_KEY")
     if key == "" {
         sqlite_close(db)
         die(100, "Bland not configured — set BLAND_API_KEY (BYO; get one at bland.ai)")
     }
-    limit := flagv(a, "--limit", "20")
     hook := env("CRM_CALL_WEBHOOK")
     voice := env("BLAND_VOICE")
     lang := env("BLAND_LANG")
-    rows := sqlite_query(db, "SELECT o.id AS oid, o.contact_id AS cid, c.phone AS phone, c.name AS company, o.body AS body FROM outreach o JOIN contacts c ON c.id=o.contact_id WHERE o.status='queued' AND o.channel='phone' AND c.phone!='' ORDER BY o.created LIMIT " + limit, []string{})
-    todo := parse(rows, []Callrow{})
     dispatched := 0
     failed := 0
     supp := 0
@@ -819,19 +924,81 @@ func cmd_call(db, a) {
 
 // crm suppress <email|phone> [reason]  -> never contact this address/number again (also
 // cancels its queued outreach on either channel). One list, keyed by the raw value.
+// Undoable (crm undo): un-suppresses only the addr forms THIS call actually added (an
+// already-suppressed address is left alone), and restores any outreach it cancelled.
 func cmd_suppress(db, a) {
     if len(a) < 3 { die(80, "usage: crm suppress <email|phone> [reason]") }
     raw := a[2]
     addr := to_lower(raw)
     reason := "manual"
     if len(a) >= 4 { reason = a[3] }
+    op := nid()
+
+    existed := sqlite_query(db, "SELECT addr FROM suppress WHERE addr=?", []string{addr})
     sqlite_exec(db, "INSERT OR IGNORE INTO suppress(addr,reason,ts) VALUES(?,?,?)", []string{addr, reason, str(now())})
-    // also store the E.164 form so a call-time lookup by normalized number matches.
+    if existed == "[]" { audit_add(db, op, "suppress", "suppress", addr, "insert", "") }
+
+    // also store the E.164 form so a call-time lookup by normalized number matches — but only
+    // when raw actually looks like a phone (has a digit); e164() on a digit-less string (an
+    // email) returns a bare "+", which would otherwise pollute the DNC list with a junk row.
     n164 := e164(raw)
-    if n164 != addr { sqlite_exec(db, "INSERT OR IGNORE INTO suppress(addr,reason,ts) VALUES(?,?,?)", []string{n164, reason, str(now())}) }
+    if n164 != addr && n164 != "+" {
+        existed164 := sqlite_query(db, "SELECT addr FROM suppress WHERE addr=?", []string{n164})
+        sqlite_exec(db, "INSERT OR IGNORE INTO suppress(addr,reason,ts) VALUES(?,?,?)", []string{n164, reason, str(now())})
+        if existed164 == "[]" { audit_add(db, op, "suppress", "suppress", n164, "insert", "") }
+    }
+
+    affrows := sqlite_query(db, "SELECT id FROM outreach WHERE status='queued' AND contact_id IN (SELECT id FROM contacts WHERE email=? OR phone=?)", []string{addr, raw})
+    aff := parse(affrows, []Idrow{})
+    i := 0
+    for i < len(aff) {
+        audit_add(db, op, "suppress", "outreach", aff[i].id, "update", snap_outreach(db, aff[i].id))
+        i = i + 1
+    }
     sqlite_exec(db, "UPDATE outreach SET status='suppressed' WHERE status='queued' AND contact_id IN (SELECT id FROM contacts WHERE email=? OR phone=?)", []string{addr, raw})
     sqlite_close(db)
     say("{\"ok\":true,\"suppressed\":\"" + esc(addr) + "\"}")
+}
+
+// crm undo [--n N]  -> revert the last N recorded operations (LIFO). Restores the pre-mutation
+// snapshot for rows an operation updated, and deletes rows it inserted (e.g. the touch a `sent`
+// call logged, or a suppress-list entry that didn't exist before). Consuming an op deletes its
+// audit rows, so undo cannot itself be undone. Only stage/next/sent/suppress are wired to the
+// trail — `crm send`/`crm call` already left the outside world (an email/call went out) and are
+// NOT undoable; use their --dry-run to preview before running them.
+func cmd_undo(db, a) {
+    n := parse_int(flagv(a, "--n", "1"))
+    if n < 1 { n = 1 }
+    oprows := sqlite_query(db, "SELECT op_id FROM audit GROUP BY op_id ORDER BY MAX(rowid) DESC LIMIT " + str(n), []string{})
+    ops := parse(oprows, []Opidrow{})
+    if len(ops) == 0 { sqlite_close(db); say("{\"ok\":true,\"undone\":0,\"note\":\"nothing to undo\"}"); return }
+    undone := 0
+    j := 0
+    for j < len(ops) {
+        opid := ops[j].op_id
+        rows := sqlite_query(db, "SELECT id, op_id, ts, cmd, tbl, row_id, action, before FROM audit WHERE op_id=? ORDER BY rowid ASC", []string{opid})
+        entries := parse(rows, []Auditrow{})
+        i := 0
+        for i < len(entries) {
+            e := entries[i]
+            if e.action == "insert" {
+                if e.tbl == "suppress" { sqlite_exec(db, "DELETE FROM suppress WHERE addr=?", []string{e.row_id}) }
+                if e.tbl == "events" { sqlite_exec(db, "DELETE FROM events WHERE id=?", []string{e.row_id}) }
+                if e.tbl == "contacts" { sqlite_exec(db, "DELETE FROM contacts WHERE id=?", []string{e.row_id}) }
+                if e.tbl == "outreach" { sqlite_exec(db, "DELETE FROM outreach WHERE id=?", []string{e.row_id}) }
+            }
+            if e.action == "update" {
+                if e.tbl == "contacts" { undo_contact(db, e.row_id, e.before) }
+                if e.tbl == "outreach" { undo_outreach(db, e.row_id, e.before) }
+            }
+            i = i + 1
+        }
+        sqlite_exec(db, "DELETE FROM audit WHERE op_id=?", []string{opid})
+        undone = undone + 1
+        j = j + 1
+    }
+    sqlite_close(db)
+    say("{\"ok\":true,\"undone\":" + str(undone) + "}")
 }
 
 func main() {
@@ -860,6 +1027,7 @@ func main() {
     if cmd == "send" { cmd_send(db, a); return }
     if cmd == "call" { cmd_call(db, a); return }
     if cmd == "suppress" || cmd == "unsub" || cmd == "dnc" { cmd_suppress(db, a); return }
+    if cmd == "undo" { cmd_undo(db, a); return }
     sqlite_close(db)
     write(2, "{\"ok\":false,\"error\":\"unknown command: " + esc(cmd) + "\"}\n")
     exit(80)

@@ -59,6 +59,7 @@ crm queue-bulk '<json>'       # load a whole channel-routed campaign (array of {
 crm campaign [--channel email|phone] [--status queued|sent]   # the staged campaign as JSON
 crm followups [--days 3 --max-touches 3] [--queue --subject S --body B]   # who is due a bump; --queue stages wave 2
 crm sent <outreach-id>        # mark sent + log the touch + advance the contact to contacted
+crm undo [--n N]              # revert the last N stage/next/sent/suppress ops, LIFO
 ```
 `<contact>` resolves by id, exact email, or a name/company substring. DB at `$CRM_DB`
 (default `~/.crm-cli.db`).
@@ -101,6 +102,7 @@ footer, and on each send logs a touch + advances the contact's stage:
 ```
 export SMTP_HOST=smtp.resend.com SMTP_PORT=587 SMTP_FROM="you@yourdomain"
 export SMTP_USER=resend SMTP_PASS=<resend-api-key>          # Resend's SMTP; or any relay
+crm send --dry-run         # preview who'd send/skip — no creds, no network, no DB writes
 crm send --limit 20        # → drip-sends 20 queued emails (2s apart), marks sent|error
 crm suppress <email>       # never email again + cancels its queued outreach (alias: unsub)
 ```
@@ -112,12 +114,28 @@ outcome comes back through the same webhook sink:
 export BLAND_API_KEY=<your-bland-key>       # BYO — you own the account + the compliance
 export CRM_CALL_WEBHOOK=https://crm.you.dev/bland   # where Bland posts the outcome
 export BLAND_LANG=fr CRM_COUNTRY_CODE=33     # optional: language + E.164 country default
+crm call --dry-run         # preview the E.164-normalized dial list — no key, no dial
 crm call --limit 20        # → dials 20 queued numbers (the call script is the outreach body)
 crm suppress <phone>       # DNC: never call again + cancels queued (alias dnc)
 ```
 Numbers are normalized to E.164, `crm serve` receives the outcome on `POST /bland` (answered /
 voicemail / no-answer) and logs it as a touch. **Cold-calling is more regulated than email**
 (TCPA, Bloctel, calling hours) — BYO-Bland means *you* own the account, consent, and opt-out list.
+
+### Safety rails — `--dry-run` and `crm undo`
+An agent drives this thing unsupervised, so mistakes need a way back:
+```
+crm send --dry-run          # preview a send: who'd get it, who's skipped (suppressed) — no side effects
+crm call --dry-run          # same, for calls — no key needed, no dial placed
+crm stage acme lost         # ...oops, wrong contact
+crm undo                    # reverts the last operation (LIFO)
+crm undo --n 3              # reverts the last 3
+```
+`undo` is backed by an audit trail (`stage`/`next`/`sent`/`suppress` — the reversible, DB-only
+mutations) that restores the exact prior row state and removes anything the operation logged
+(e.g. `sent`'s touch). Consuming an op deletes its trail, so undo can't itself be undone, and
+independent earlier ops are untouched by a later one's undo. **`crm send`/`crm call` are NOT
+undoable** — an email or a call already left the building; that's what `--dry-run` is for.
 
 ### The whole outbound loop, one binary
 ```
