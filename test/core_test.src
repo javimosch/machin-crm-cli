@@ -42,10 +42,20 @@ func test_version() {
     assert(len(version_str()) > 0, "version non-empty")
 }
 
+func test_merge_helpers() {
+    assert_eq_str(merge_field("a", "b"), "a", "merge_field prefers primary")
+    assert_eq_str(merge_field("", "b"), "b", "merge_field falls back to dupe")
+    assert_eq_str(merge_field("", ""), "", "merge_field both empty")
+    assert_eq_str(merge_stage("new", "contacted"), "contacted", "merge_stage adopts dupe when primary is new")
+    assert_eq_str(merge_stage("contacted", "meeting"), "contacted", "merge_stage keeps primary once past new")
+    assert_eq_str(merge_stage("new", "new"), "new", "merge_stage both new")
+}
+
 func main() {
     test_e164()
     test_esc()
     test_flags()
     test_version()
+    test_merge_helpers()
     test_summary()
 }

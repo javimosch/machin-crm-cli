@@ -42,6 +42,23 @@ type Auditrow struct {
     before string
 }
 
+// Dedupairrow is one candidate pair from `crm dedup`'s SQL-driven rules (same_email,
+// same_name_company): "a" columns aliased so all three rules share one struct shape.
+type Dedupairrow struct {
+    aid string
+    aname string
+    bid string
+    bname string
+    akey string
+}
+
+// Phonerow — id/name/phone for the app-level (e164-normalized) phone-duplicate rule.
+type Phonerow struct {
+    id string
+    name string
+    phone string
+}
+
 // Qitem is one prepared outreach in a bulk campaign load (crm queue-bulk).
 type Qitem struct {
     contact string
@@ -112,6 +129,31 @@ func undo_outreach(db, id, before) (ok) {
     if before == "" || before == "[]" { return ok }
     sqlite_exec(db, "UPDATE outreach SET subject=?,body=?,status=?,sent_at=?,error=? WHERE id=?",
         []string{jget(before, "[0].subject"), jget(before, "[0].body"), jget(before, "[0].status"), jget(before, "[0].sent_at"), jget(before, "[0].error"), id})
+    ok = 1
+}
+
+// undo_reassign_event / undo_reassign_outreach — restore an event's/outreach's contact_id
+// (the only field a `crm merge` reassignment touches); before is "[{\"contact_id\":\"<id>\"}]".
+func undo_reassign_event(db, id, before) (ok) {
+    ok = 0
+    if before == "" || before == "[]" { return ok }
+    sqlite_exec(db, "UPDATE events SET contact_id=? WHERE id=?", []string{jget(before, "[0].contact_id"), id})
+    ok = 1
+}
+func undo_reassign_outreach(db, id, before) (ok) {
+    ok = 0
+    if before == "" || before == "[]" { return ok }
+    sqlite_exec(db, "UPDATE outreach SET contact_id=? WHERE id=?", []string{jget(before, "[0].contact_id"), id})
+    ok = 1
+}
+
+// reinsert_contact — undo a `crm merge`'s DELETE by re-inserting the duplicate exactly as it
+// was (same id), from its pre-delete snap_contact snapshot.
+func reinsert_contact(db, before) (ok) {
+    ok = 0
+    if before == "" || before == "[]" { return ok }
+    sqlite_exec(db, "INSERT INTO contacts(id,name,company,email,phone,source,stage,next_action,next_due,created,updated) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+        []string{jget(before, "[0].id"), jget(before, "[0].name"), jget(before, "[0].company"), jget(before, "[0].email"), jget(before, "[0].phone"), jget(before, "[0].source"), jget(before, "[0].stage"), jget(before, "[0].next_action"), jget(before, "[0].next_due"), jget(before, "[0].created"), jget(before, "[0].updated")})
     ok = 1
 }
 
@@ -547,7 +589,7 @@ func cmd_update() {
 }
 
 func cmd_help() {
-    say("{\"ok\":true,\"name\":\"crm-cli\",\"version\":\"" + version_str() + "\",\"tagline\":\"the agent-first CRM — sink for the outreach machine\",\"db\":\"$CRM_DB or ~/.crm-cli.db\",\"commands\":{\"add\":\"add <name> [--company --email --phone --source --stage]\",\"log\":\"log <contact> <channel> <summary> [--ref --direction]\",\"stage\":\"stage <contact> <new|contacted|replied|meeting|deal|won|lost>\",\"next\":\"next <contact> <action> [--due YYYY-MM-DD|+N days]\",\"show\":\"show <contact>\",\"list\":\"list [--stage X]\",\"due\":\"due (next steps due today/overdue)\",\"pipeline\":\"pipeline (counts by stage)\",\"ingest\":\"ingest '<json>' (bulk from grepapi leads)\",\"queue\":\"queue <contact> <email|phone> [--subject --body] (stage one outreach)\",\"queue-bulk\":\"queue-bulk '<json [{contact,channel,subject,body}]>' (load a campaign)\",\"campaign\":\"campaign [--channel email|phone] [--status queued|sent] (the staged campaign as JSON)\",\"followups\":\"followups [--days 3 --max-touches 3 --limit 200] [--queue --subject S --body B] (who is due a bump; --queue stages wave 2, {{name}}/{{company}} substituted)\",\"sent\":\"sent <outreach-id> (mark sent + log touch + advance stage)\",\"send\":\"send [--limit N] [--dry-run] (drip-send queued EMAIL outreach via SMTP; needs SMTP_* env; suppression + footer + stage advance; --dry-run previews with no creds/network/DB writes)\",\"call\":\"call [--limit N] [--dry-run] (drip-dispatch queued PHONE outreach as AI cold-calls via Bland; needs BLAND_API_KEY; outcomes return via serve POST /bland; --dry-run previews with no key/network/DB writes)\",\"suppress\":\"suppress <email|phone> [reason] (never contact again; alias unsub/dnc; undoable)\",\"undo\":\"undo [--n N] (revert the last N stage/next/sent/suppress operations, LIFO; send/call are NOT undoable — an email/call already left)\",\"serve\":\"serve [port] (webhook sink: POST /resend email events + POST /bland call outcomes -> the CRM; bounces/complaints auto-suppress)\",\"version\":\"version (the installed release)\",\"update\":\"update (self-update to the latest release)\"}}")
+    say("{\"ok\":true,\"name\":\"crm-cli\",\"version\":\"" + version_str() + "\",\"tagline\":\"the agent-first CRM — sink for the outreach machine\",\"db\":\"$CRM_DB or ~/.crm-cli.db\",\"commands\":{\"add\":\"add <name> [--company --email --phone --source --stage]\",\"log\":\"log <contact> <channel> <summary> [--ref --direction]\",\"stage\":\"stage <contact> <new|contacted|replied|meeting|deal|won|lost>\",\"next\":\"next <contact> <action> [--due YYYY-MM-DD|+N days]\",\"show\":\"show <contact>\",\"list\":\"list [--stage X]\",\"due\":\"due (next steps due today/overdue)\",\"pipeline\":\"pipeline (counts by stage)\",\"ingest\":\"ingest '<json>' (bulk from grepapi leads)\",\"queue\":\"queue <contact> <email|phone> [--subject --body] (stage one outreach)\",\"queue-bulk\":\"queue-bulk '<json [{contact,channel,subject,body}]>' (load a campaign)\",\"campaign\":\"campaign [--channel email|phone] [--status queued|sent] (the staged campaign as JSON)\",\"followups\":\"followups [--days 3 --max-touches 3 --limit 200] [--queue --subject S --body B] (who is due a bump; --queue stages wave 2, {{name}}/{{company}} substituted)\",\"sent\":\"sent <outreach-id> (mark sent + log touch + advance stage)\",\"send\":\"send [--limit N] [--dry-run] (drip-send queued EMAIL outreach via SMTP; needs SMTP_* env; suppression + footer + stage advance; --dry-run previews with no creds/network/DB writes)\",\"call\":\"call [--limit N] [--dry-run] (drip-dispatch queued PHONE outreach as AI cold-calls via Bland; needs BLAND_API_KEY; outcomes return via serve POST /bland; --dry-run previews with no key/network/DB writes)\",\"suppress\":\"suppress <email|phone> [reason] (never contact again; alias unsub/dnc; undoable)\",\"undo\":\"undo [--n N] (revert the last N stage/next/sent/suppress/merge operations, LIFO; send/call are NOT undoable — an email/call already left)\",\"dedup\":\"dedup [--limit N] (read-only scan for likely-duplicate contacts by same_email/same_phone/same_name_company, as merge candidates)\",\"merge\":\"merge <primary> <dupe> (combine dupe into primary — fields, events, outreach — then delete dupe; undoable)\",\"serve\":\"serve [port] (webhook sink: POST /resend email events + POST /bland call outcomes -> the CRM; bounces/complaints auto-suppress)\",\"version\":\"version (the installed release)\",\"update\":\"update (self-update to the latest release)\"}}")
 }
 
 // crm queue <contact> <channel> [--subject X --body X]  -> stage one outreach message.
@@ -961,11 +1003,138 @@ func cmd_suppress(db, a) {
 }
 
 // crm undo [--n N]  -> revert the last N recorded operations (LIFO). Restores the pre-mutation
-// snapshot for rows an operation updated, and deletes rows it inserted (e.g. the touch a `sent`
-// call logged, or a suppress-list entry that didn't exist before). Consuming an op deletes its
-// audit rows, so undo cannot itself be undone. Only stage/next/sent/suppress are wired to the
-// trail — `crm send`/`crm call` already left the outside world (an email/call went out) and are
-// NOT undoable; use their --dry-run to preview before running them.
+// snapshot for rows an operation updated, deletes rows it inserted (e.g. the touch a `sent`
+// call logged, or a suppress-list entry that didn't exist before), and re-inserts rows it
+// deleted (a `merge`'s duplicate). Consuming an op deletes its audit rows, so undo cannot itself
+// be undone. Only stage/next/sent/suppress/merge are wired to the trail — `crm send`/`crm call`
+// already left the outside world (an email/call went out) and are NOT undoable; use their
+// --dry-run to preview before running them.
+// crm dedup [--limit N]  -> read-only scan for likely-duplicate contacts, one candidate PAIR
+// per row (primary = earlier-inserted, dupe = later — by rowid, so it's deterministic even
+// when both were created in the same second), grouped by why they match:
+//   same_email          — same address, different case/whitespace only
+//   same_phone          — same number once normalized to E.164 (formatting-only duplicates
+//                          that `add`'s exact-string phone match misses)
+//   same_name_company   — same normalized name AND company (no email/phone overlap needed)
+// A group of 3+ duplicates emits multiple pairs; merge one at a time and re-run — earlier
+// pairs can go stale once their primary/dupe id no longer exists.
+func cmd_dedup(db, a) {
+    limit := flagv(a, "--limit", "200")
+    out := "["
+    first := 1
+
+    r1 := sqlite_query(db, "SELECT a.id AS aid, a.name AS aname, b.id AS bid, b.name AS bname, a.email AS akey FROM contacts a JOIN contacts b ON lower(trim(a.email))=lower(trim(b.email)) AND a.rowid<b.rowid AND trim(a.email)<>'' ORDER BY a.rowid LIMIT " + limit, []string{})
+    pairs1 := parse(r1, []Dedupairrow{})
+    i := 0
+    for i < len(pairs1) {
+        p := pairs1[i]
+        if first == 0 { out = out + "," }
+        out = out + "{\"primary\":\"" + esc(p.aid) + "\",\"primary_name\":\"" + esc(p.aname) + "\",\"dupe\":\"" + esc(p.bid) + "\",\"dupe_name\":\"" + esc(p.bname) + "\",\"reason\":\"same_email\",\"key\":\"" + esc(to_lower(p.akey)) + "\"}"
+        first = 0
+        i = i + 1
+    }
+
+    prows := sqlite_query(db, "SELECT id, name, phone FROM contacts WHERE phone<>'' ORDER BY rowid", []string{})
+    ph := parse(prows, []Phonerow{})
+    i = 0
+    for i < len(ph) {
+        j := i + 1
+        for j < len(ph) {
+            if e164(ph[i].phone) == e164(ph[j].phone) {
+                if first == 0 { out = out + "," }
+                out = out + "{\"primary\":\"" + esc(ph[i].id) + "\",\"primary_name\":\"" + esc(ph[i].name) + "\",\"dupe\":\"" + esc(ph[j].id) + "\",\"dupe_name\":\"" + esc(ph[j].name) + "\",\"reason\":\"same_phone\",\"key\":\"" + esc(e164(ph[i].phone)) + "\"}"
+                first = 0
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+
+    r3 := sqlite_query(db, "SELECT a.id AS aid, a.name AS aname, b.id AS bid, b.name AS bname, a.company AS akey FROM contacts a JOIN contacts b ON lower(trim(a.name))=lower(trim(b.name)) AND lower(trim(a.company))=lower(trim(b.company)) AND trim(a.name)<>'' AND trim(a.company)<>'' AND a.rowid<b.rowid ORDER BY a.rowid LIMIT " + limit, []string{})
+    pairs3 := parse(r3, []Dedupairrow{})
+    i = 0
+    for i < len(pairs3) {
+        p := pairs3[i]
+        if first == 0 { out = out + "," }
+        out = out + "{\"primary\":\"" + esc(p.aid) + "\",\"primary_name\":\"" + esc(p.aname) + "\",\"dupe\":\"" + esc(p.bid) + "\",\"dupe_name\":\"" + esc(p.bname) + "\",\"reason\":\"same_name_company\",\"key\":\"" + esc(to_lower(p.akey)) + "\"}"
+        first = 0
+        i = i + 1
+    }
+
+    out = out + "]"
+    sqlite_close(db)
+    say("{\"ok\":true,\"candidates\":" + out + "}")
+}
+
+// crm merge <primary> <dupe>  -> combine dupe into primary: fills primary's blank fields from
+// dupe via merge_field (primary wins on conflicts — the dupe's differing value is dropped, not
+// merged as a list), adopts dupe's stage via merge_stage only if primary is still 'new',
+// reassigns dupe's events + outreach to primary, logs the merge as a touch, then deletes dupe.
+// Undoable (crm undo): restores primary's fields, moves events/outreach back, removes the
+// merge-log touch, and re-inserts dupe exactly as it was (same id).
+// CAVEAT: if both primary and dupe have pending campaign items, merging can leave two queued
+// outreach rows under one contact — check `crm campaign` before the next `crm send`/`crm call`.
+func cmd_merge(db, a) {
+    if len(a) < 4 { die(80, "usage: crm merge <primary> <dupe>") }
+    pid := resolve(db, a[2])
+    if pid == "" { die(90, "no contact matching: " + a[2]) }
+    did := resolve(db, a[3])
+    if did == "" { die(90, "no contact matching: " + a[3]) }
+    if pid == did { die(80, "primary and dupe resolve to the same contact: " + pid) }
+
+    op := nid()
+    n := now()
+    before_p := snap_contact(db, pid)
+    before_d := snap_contact(db, did)
+    ps := parse(before_p, []Contact{})
+    ds := parse(before_d, []Contact{})
+    if len(ps) == 0 || len(ds) == 0 { sqlite_close(db); die(90, "contact vanished mid-merge") }
+    p := ps[0]
+    d := ds[0]
+
+    company := merge_field(p.company, d.company)
+    email := merge_field(p.email, d.email)
+    phone := merge_field(p.phone, d.phone)
+    source := merge_field(p.source, d.source)
+    stage := merge_stage(p.stage, d.stage)
+    next_action := p.next_action
+    next_due := p.next_due
+    if next_action == "" { next_action = d.next_action; next_due = d.next_due }   // paired, not independently merge_field'd
+
+    sqlite_exec(db, "UPDATE contacts SET company=?,email=?,phone=?,source=?,stage=?,next_action=?,next_due=?,updated=? WHERE id=?",
+        []string{company, email, phone, source, stage, next_action, next_due, str(n), pid})
+    audit_add(db, op, "merge", "contacts", pid, "update", before_p)
+
+    evrows := sqlite_query(db, "SELECT id FROM events WHERE contact_id=?", []string{did})
+    evs := parse(evrows, []Idrow{})
+    i := 0
+    for i < len(evs) {
+        audit_add(db, op, "merge", "events_reassign", evs[i].id, "update", "[{\"contact_id\":\"" + esc(did) + "\"}]")
+        i = i + 1
+    }
+    sqlite_exec(db, "UPDATE events SET contact_id=? WHERE contact_id=?", []string{pid, did})
+
+    orrows := sqlite_query(db, "SELECT id FROM outreach WHERE contact_id=?", []string{did})
+    ors := parse(orrows, []Idrow{})
+    i = 0
+    for i < len(ors) {
+        audit_add(db, op, "merge", "outreach_reassign", ors[i].id, "update", "[{\"contact_id\":\"" + esc(did) + "\"}]")
+        i = i + 1
+    }
+    sqlite_exec(db, "UPDATE outreach SET contact_id=? WHERE contact_id=?", []string{pid, did})
+
+    meid := nid()
+    sqlite_exec(db, "INSERT INTO events(id,contact_id,channel,direction,summary,ref,ts) VALUES(?,?,?,?,?,?,?)",
+        []string{meid, pid, "system", "out", "merged duplicate " + d.name + " (" + did + ")", did, str(n)})
+    audit_add(db, op, "merge", "events", meid, "insert", "")
+
+    sqlite_exec(db, "DELETE FROM contacts WHERE id=?", []string{did})
+    audit_add(db, op, "merge", "contacts", did, "delete", before_d)
+
+    sqlite_close(db)
+    say("{\"ok\":true,\"primary\":\"" + pid + "\",\"merged\":\"" + did + "\"}")
+}
+
 func cmd_undo(db, a) {
     n := parse_int(flagv(a, "--n", "1"))
     if n < 1 { n = 1 }
@@ -990,6 +1159,11 @@ func cmd_undo(db, a) {
             if e.action == "update" {
                 if e.tbl == "contacts" { undo_contact(db, e.row_id, e.before) }
                 if e.tbl == "outreach" { undo_outreach(db, e.row_id, e.before) }
+                if e.tbl == "events_reassign" { undo_reassign_event(db, e.row_id, e.before) }
+                if e.tbl == "outreach_reassign" { undo_reassign_outreach(db, e.row_id, e.before) }
+            }
+            if e.action == "delete" {
+                if e.tbl == "contacts" { reinsert_contact(db, e.before) }
             }
             i = i + 1
         }
@@ -1028,6 +1202,8 @@ func main() {
     if cmd == "call" { cmd_call(db, a); return }
     if cmd == "suppress" || cmd == "unsub" || cmd == "dnc" { cmd_suppress(db, a); return }
     if cmd == "undo" { cmd_undo(db, a); return }
+    if cmd == "dedup" { cmd_dedup(db, a); return }
+    if cmd == "merge" { cmd_merge(db, a); return }
     sqlite_close(db)
     write(2, "{\"ok\":false,\"error\":\"unknown command: " + esc(cmd) + "\"}\n")
     exit(80)

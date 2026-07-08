@@ -59,7 +59,9 @@ crm queue-bulk '<json>'       # load a whole channel-routed campaign (array of {
 crm campaign [--channel email|phone] [--status queued|sent]   # the staged campaign as JSON
 crm followups [--days 3 --max-touches 3] [--queue --subject S --body B]   # who is due a bump; --queue stages wave 2
 crm sent <outreach-id>        # mark sent + log the touch + advance the contact to contacted
-crm undo [--n N]              # revert the last N stage/next/sent/suppress ops, LIFO
+crm dedup [--limit N]         # read-only scan for likely-duplicate contacts (merge candidates)
+crm merge <primary> <dupe>    # combine dupe into primary (fields, events, outreach), then delete dupe
+crm undo [--n N]              # revert the last N stage/next/sent/suppress/merge ops, LIFO
 ```
 `<contact>` resolves by id, exact email, or a name/company substring. DB at `$CRM_DB`
 (default `~/.crm-cli.db`).
@@ -131,11 +133,29 @@ crm stage acme lost         # ...oops, wrong contact
 crm undo                    # reverts the last operation (LIFO)
 crm undo --n 3              # reverts the last 3
 ```
-`undo` is backed by an audit trail (`stage`/`next`/`sent`/`suppress` — the reversible, DB-only
-mutations) that restores the exact prior row state and removes anything the operation logged
-(e.g. `sent`'s touch). Consuming an op deletes its trail, so undo can't itself be undone, and
-independent earlier ops are untouched by a later one's undo. **`crm send`/`crm call` are NOT
-undoable** — an email or a call already left the building; that's what `--dry-run` is for.
+`undo` is backed by an audit trail (`stage`/`next`/`sent`/`suppress`/`merge` — the reversible,
+DB-only mutations) that restores the exact prior row state, removes anything the operation
+logged (e.g. `sent`'s touch), and re-inserts anything it deleted (a `merge`'s duplicate).
+Consuming an op deletes its trail, so undo can't itself be undone, and independent earlier ops
+are untouched by a later one's undo. **`crm send`/`crm call` are NOT undoable** — an email or a
+call already left the building; that's what `--dry-run` is for.
+
+### Entity resolution — `crm dedup` / `crm merge`
+`add`'s dedup is exact-match only (same email, same phone string), so contacts from different
+sources drift apart: `Bob@X.com` vs `bob@x.com`, or `0611223344` vs `+33 6 11 22 33 44` land as
+two rows. `dedup` finds these as read-only candidates; `merge` combines a pair:
+```
+crm dedup                       # {"candidates":[{"primary":..,"dupe":..,"reason":"same_email"}, ...]}
+crm merge acme-primary acme-dupe   # fields fill from dupe where primary is blank, events +
+                                    # outreach reassign to primary, dupe is deleted
+crm undo                        # merged the wrong pair? one undo fully reverses it
+```
+Three rules, run independently: **same_email** (case/whitespace only), **same_phone** (same
+number once normalized to E.164 — the formatting duplicates `add` misses), **same_name_company**
+(no email/phone overlap needed). A group of 3+ duplicates emits multiple pairs — merge one at a
+time and re-run `dedup`, since earlier pairs can go stale once their id is gone. On a field
+conflict the primary's value wins (the dupe's differing value is dropped, not merged as a list);
+if both had pending campaign items, check `crm campaign` after merging before the next `send`/`call`.
 
 ### The whole outbound loop, one binary
 ```

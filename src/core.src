@@ -5,7 +5,7 @@
 
 // Bumped per release; the released binary reports it via `crm version`, and it's what
 // `crm update` compares against. Keep in lockstep with the git tag.
-func version_str() (v) { v = "0.3.0" }
+func version_str() (v) { v = "0.4.0" }
 
 // esc — JSON-escape a string for hand-built JSON output (stdout is the agent contract).
 func esc(s) (o) {
@@ -60,4 +60,19 @@ func e164(phone) (e) {
     if has_prefix(d, "0") { e = "+" + cc + substr(d, 1, len(d))  return e }
     if has_prefix(d, cc) { e = "+" + d  return e }
     e = "+" + d
+}
+
+// merge_field — the "primary wins, dupe fills blanks" rule for combining two duplicate
+// contacts (crm merge): p if non-empty, else d. If both are non-empty, d's value is dropped
+// (not merged as a list) — the caller documents this as an intentional v1 simplification.
+func merge_field(p, d) (v) {
+    v = p
+    if p == "" { v = d }
+}
+
+// merge_stage — which stage survives a contact merge: keep the primary's unless it's still
+// 'new' and the duplicate has progressed further, in which case adopt the duplicate's.
+func merge_stage(p_stage, d_stage) (s) {
+    s = p_stage
+    if p_stage == "new" && d_stage != "new" { s = d_stage }
 }

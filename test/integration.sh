@@ -172,5 +172,62 @@ ok "followups --queue stages >=1" 1 "$([ "$(jq -r .queued <<<"$r")" -ge 1 ] && e
 ok "  ...f now has a queued wave-2 outreach" 1 "$(q "SELECT COUNT(*) FROM outreach WHERE status='queued' AND contact_id=(SELECT id FROM contacts WHERE email='f@z.com')")"
 ok "  ...and is no longer 'due'" "" "$($CRM followups --days 3 | jq -r '.followups[]|select(.email=="f@z.com").email')"
 
+# =====================  ENTITY RESOLUTION: crm dedup / crm merge  =====================
+
+# --- dedup: same_email (case/whitespace diff) -------------------------------
+$CRM add DupA1 --email "Dup@Case.com" --company "Case Co" >/dev/null
+$CRM add DupA2 --email "dup@case.com" >/dev/null
+ok "dedup finds same_email pair" dup@case.com "$($CRM dedup | jq -r '.candidates[]|select(.reason=="same_email" and .key=="dup@case.com").key')"
+
+# --- dedup: same_phone (formatting-only diff `add` misses) ------------------
+$CRM add DupB1 --phone "0611223344" >/dev/null
+$CRM add DupB2 --phone "+33 6 11 22 33 44" >/dev/null
+ok "dedup finds same_phone pair (E.164)" +33611223344 "$($CRM dedup | jq -r '.candidates[]|select(.reason=="same_phone" and .key=="+33611223344").key')"
+
+# --- dedup: same_name_company (no email/phone overlap needed) --------------
+$CRM add "  Dup Name  " --company "Dup Co" >/dev/null
+$CRM add "dup name" --company "DUP CO" >/dev/null
+ok "dedup finds same_name_company pair" "dup co" "$($CRM dedup | jq -r '.candidates[]|select(.reason=="same_name_company" and .key=="dup co").key')"
+
+# --- dedup does NOT flag genuinely distinct contacts ------------------------
+$CRM add Distinct1 --email d1@z.com >/dev/null
+$CRM add Distinct2 --email d2@z.com >/dev/null
+ok "dedup ignores distinct contacts" "" "$($CRM dedup | jq -r '.candidates[]|select(.primary_name=="Distinct1" or .dupe_name=="Distinct1")')"
+
+# --- dedup primary/dupe ordering is deterministic (earlier-inserted wins) ---
+r=$($CRM dedup | jq -r '.candidates[]|select(.reason=="same_email" and .key=="dup@case.com")')
+ok "dedup primary is the earlier-inserted (DupA1)" DupA1 "$(jq -r .primary_name <<<"$r")"
+ok "dedup dupe is the later-inserted (DupA2)"       DupA2 "$(jq -r .dupe_name <<<"$r")"
+
+# --- merge: fields fill from dupe, stage adopts if primary was 'new', events
+# + outreach reassign, dupe deleted ------------------------------------------
+$CRM add MPrimary --email mp@z.com --phone 0699 >/dev/null   # stage=new, no company
+$CRM add MDupe --company "Merge Co" >/dev/null
+DID=$($CRM show MDupe | jq -r '.contact[0].id')
+$CRM log "$DID" call "left a voicemail" >/dev/null            # -> dupe stage=contacted
+$CRM queue "$DID" phone --body "ring" >/dev/null               # dupe has queued outreach
+PID=$($CRM show MPrimary | jq -r '.contact[0].id')
+$CRM merge "$PID" "$DID" >/dev/null
+ok "merge adopts dupe's company (primary's was blank)" "Merge Co" "$(q "SELECT company FROM contacts WHERE id='$PID'")"
+ok "merge adopts dupe's stage (primary was 'new')"     contacted  "$(q "SELECT stage FROM contacts WHERE id='$PID'")"
+ok "merge keeps primary's own phone (non-blank wins)"  0699       "$(q "SELECT phone FROM contacts WHERE id='$PID'")"
+ok "merge deletes the dupe row"                        0          "$(q "SELECT COUNT(*) FROM contacts WHERE id='$DID'")"
+ok "merge reassigns dupe's events to primary"          1          "$(q "SELECT COUNT(*) FROM events WHERE contact_id='$PID' AND channel='call'")"
+ok "merge reassigns dupe's outreach to primary"        1          "$(q "SELECT COUNT(*) FROM outreach WHERE contact_id='$PID'")"
+
+# --- merge rejects merging a contact into itself ----------------------------
+r=$($CRM merge "$PID" "$PID" 2>&1); ec=$?
+ok "merge self-merge is rejected (non-zero exit)" 1 "$([ $ec -ne 0 ] && echo 1 || echo 0)"
+
+# --- merge is fully undoable: fields, stage, events, outreach, and the dupe
+# row itself all come back exactly as they were --------------------------
+$CRM undo >/dev/null
+ok "undo restores primary's company to blank"  "" "$(q "SELECT company FROM contacts WHERE id='$PID'")"
+ok "undo restores primary's stage to new"       new "$(q "SELECT stage FROM contacts WHERE id='$PID'")"
+ok "undo re-inserts the dupe row"               "Merge Co" "$(q "SELECT company FROM contacts WHERE id='$DID'")"
+ok "undo moves the event back to dupe"          1 "$(q "SELECT COUNT(*) FROM events WHERE contact_id='$DID' AND channel='call'")"
+ok "undo moves the outreach back to dupe"       1 "$(q "SELECT COUNT(*) FROM outreach WHERE contact_id='$DID'")"
+ok "undo removes the merge-log touch"           0 "$(q "SELECT COUNT(*) FROM events WHERE contact_id='$PID' AND channel='system'")"
+
 echo "== integration: $P passed, $F failed =="
 [ "$F" -eq 0 ]
