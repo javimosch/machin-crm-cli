@@ -5,25 +5,146 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>crm-cli Documentation</title>
     <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
     <link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
     <style>
       body { font-family: 'Geist', system-ui, sans-serif; background-color: #050505; color: #e2e8f0; }
       h1 { font-family: 'Geist', system-ui, sans-serif; }
+
+      /* rendered-markdown typography — hand-rolled (no Tailwind typography plugin on the play CDN) */
+      .markdown-body { line-height: 1.75; color: #cbd5e1; }
+      .markdown-body h1 { font-size: 2rem; font-weight: 700; color: #fff; margin: 0 0 .75rem; letter-spacing: -0.01em; }
+      .markdown-body h2 { font-size: 1.375rem; font-weight: 600; color: #fff; margin: 2rem 0 .75rem; padding-top: 1rem; border-top: 1px solid rgba(255,255,255,.08); }
+      .markdown-body h2:first-child { margin-top: 0; padding-top: 0; border-top: none; }
+      .markdown-body h3 { font-size: 1.1rem; font-weight: 600; color: #fff; margin: 1.5rem 0 .5rem; }
+      .markdown-body p { margin: 0 0 1rem; color: rgba(226,232,240,.85); }
+      .markdown-body a { color: #34d399; text-decoration: none; border-bottom: 1px solid rgba(52,211,153,.3); }
+      .markdown-body a:hover { border-bottom-color: #34d399; }
+      .markdown-body strong { color: #fff; font-weight: 600; }
+      .markdown-body code { background: #14161a; border: 1px solid rgba(255,255,255,.08); border-radius: 4px; padding: .1em .4em; font-size: .875em; color: #6ee7c9; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+      .markdown-body pre { background: #0f1115; border: 1px solid rgba(255,255,255,.08); border-radius: 10px; padding: 1rem 1.1rem; overflow-x: auto; margin: 0 0 1.25rem; }
+      .markdown-body pre code { background: none; border: none; padding: 0; color: #dbeafe; font-size: .85em; line-height: 1.6; }
+      .markdown-body ul, .markdown-body ol { margin: 0 0 1rem; padding-left: 1.4rem; color: rgba(226,232,240,.85); }
+      .markdown-body li { margin: .3rem 0; }
+      .markdown-body li > p { margin: 0; }
+      .markdown-body blockquote { border-left: 2px solid rgba(52,211,153,.4); padding-left: 1rem; margin: 0 0 1rem; color: rgba(226,232,240,.6); }
+      .markdown-body table { width: 100%; border-collapse: collapse; margin: 0 0 1.25rem; font-size: .9em; }
+      .markdown-body th, .markdown-body td { border: 1px solid rgba(255,255,255,.08); padding: .5rem .75rem; text-align: left; }
+      .markdown-body th { color: #fff; background: rgba(255,255,255,.03); font-weight: 600; }
+      .markdown-body hr { border: none; border-top: 1px solid rgba(255,255,255,.08); margin: 2rem 0; }
+
+      .navlink { display: block; padding: .5rem .75rem; border-radius: 8px; color: rgba(255,255,255,.5); font-size: .875rem; font-weight: 500; text-decoration: none; transition: all .15s; }
+      .navlink:hover { color: rgba(255,255,255,.85); background: rgba(255,255,255,.04); }
+      .navlink.active { color: #34d399; background: rgba(52,211,153,.08); }
     </style>
   </head>
   <body class="bg-[#0a0a0b] min-h-screen">
-    <div class="max-w-5xl mx-auto px-6 py-24">
-      <h1 class="text-5xl font-bold text-white tracking-tight">crm-cli</h1>
-      <p class="text-white/40 mt-3 text-lg">The agent-first CRM — a local-first, single-binary CRM with no UI. JSON on stdout, structured errors on stderr, semantic exit codes.</p>
-      <nav class="mt-8 flex flex-wrap gap-3">
-        <a href="quickstart.md" class="inline-flex items-center gap-2 px-5 py-2.5 rounded-full border border-white/10 text-white/60 font-medium text-sm hover:border-white/20 hover:text-white/90 transition-all duration-300">Quickstart <span class="text-[10px]">→</span></a>
-        <a href="commands.md" class="inline-flex items-center gap-2 px-5 py-2.5 rounded-full border border-white/10 text-white/60 font-medium text-sm hover:border-white/20 hover:text-white/90 transition-all duration-300">Commands <span class="text-[10px]">→</span></a>
-        <a href="outbound-loop.md" class="inline-flex items-center gap-2 px-5 py-2.5 rounded-full border border-white/10 text-white/60 font-medium text-sm hover:border-white/20 hover:text-white/90 transition-all duration-300">Outbound loop <span class="text-[10px]">→</span></a>
-        <a href="safety-rails.md" class="inline-flex items-center gap-2 px-5 py-2.5 rounded-full border border-white/10 text-white/60 font-medium text-sm hover:border-white/20 hover:text-white/90 transition-all duration-300">Safety rails <span class="text-[10px]">→</span></a>
-        <a href="entity-resolution.md" class="inline-flex items-center gap-2 px-5 py-2.5 rounded-full border border-white/10 text-white/60 font-medium text-sm hover:border-white/20 hover:text-white/90 transition-all duration-300">Entity resolution <span class="text-[10px]">→</span></a>
-        <a href="architecture.md" class="inline-flex items-center gap-2 px-5 py-2.5 rounded-full border border-white/10 text-white/60 font-medium text-sm hover:border-white/20 hover:text-white/90 transition-all duration-300">Architecture <span class="text-[10px]">→</span></a>
-        <a href="changelog.html" class="inline-flex items-center gap-2 px-5 py-2.5 rounded-full border border-white/20 text-white/80 font-medium text-sm hover:border-white/40 hover:text-white transition-all duration-300">Changelog <span class="text-[10px]">→</span></a>
-      </nav>
+    <div class="max-w-6xl mx-auto px-6 py-14">
+      <a href="./" class="block">
+        <h1 class="text-3xl font-bold text-white tracking-tight">crm-cli</h1>
+        <p class="text-white/40 mt-1.5 text-sm">The agent-first CRM — a local-first, single-binary CRM with no UI. JSON on stdout, structured errors on stderr, semantic exit codes.</p>
+      </a>
+
+      <div class="mt-10 grid grid-cols-1 md:grid-cols-[220px_1fr] gap-10">
+        <nav id="sidebar" class="md:sticky md:top-10 md:self-start flex flex-row md:flex-col gap-1 flex-wrap md:flex-nowrap border-b md:border-b-0 border-white/10 pb-4 md:pb-0">
+          <!-- populated by JS -->
+        </nav>
+
+        <main id="content" class="markdown-body min-w-0">
+          <div class="text-white/30 text-sm">Loading…</div>
+        </main>
+      </div>
+
+      <footer class="mt-16 pt-6 border-t border-white/10 text-white/25 text-xs flex flex-wrap gap-x-4 gap-y-2">
+        <span>crm-cli · built in <a href="https://github.com/javimosch/machin" class="text-white/40 hover:text-white/70">machin</a></span>
+        <a href="https://github.com/javimosch/machin-crm-cli" class="text-white/40 hover:text-white/70">Source on GitHub</a>
+        <a href="https://crmd.intrane.fr" class="text-white/40 hover:text-white/70">crmd (hosted)</a>
+      </footer>
     </div>
+
+    <script>
+      // key -> {file, label}. "changelog" is a real separate page (its own tabs/theme), not
+      // fetched into the SPA content pane — everything else is a docs/*.md file rendered here.
+      const DOCS = {
+        quickstart:  { file: 'quickstart.md',        label: 'Quickstart' },
+        commands:    { file: 'commands.md',           label: 'Commands' },
+        outbound:    { file: 'outbound-loop.md',       label: 'Outbound loop' },
+        safety:      { file: 'safety-rails.md',         label: 'Safety rails' },
+        entity:      { file: 'entity-resolution.md',     label: 'Entity resolution' },
+        architecture:{ file: 'architecture.md',           label: 'Architecture' },
+      };
+      // reverse lookup: filename -> key, so links written INSIDE the markdown (e.g. "commands.md")
+      // route through the SPA too, instead of falling through to a raw-text page load.
+      const FILE_TO_KEY = Object.fromEntries(Object.entries(DOCS).map(([k, v]) => [v.file, k]));
+
+      const sidebar = document.getElementById('sidebar');
+      const content = document.getElementById('content');
+
+      for (const [key, doc] of Object.entries(DOCS)) {
+        const a = document.createElement('a');
+        a.href = '#' + key;
+        a.className = 'navlink';
+        a.textContent = doc.label;
+        a.dataset.key = key;
+        a.addEventListener('click', (e) => { e.preventDefault(); navigate(key); });
+        sidebar.appendChild(a);
+      }
+      const clog = document.createElement('a');
+      clog.href = 'changelog.html';
+      clog.className = 'navlink';
+      clog.textContent = 'Changelog ↗';
+      sidebar.appendChild(clog);
+
+      function setActive(key) {
+        sidebar.querySelectorAll('.navlink').forEach(a => a.classList.toggle('active', a.dataset.key === key));
+      }
+
+      async function loadDoc(key) {
+        const doc = DOCS[key];
+        if (!doc) { key = 'quickstart'; }
+        setActive(key);
+        content.innerHTML = '<div class="text-white/30 text-sm">Loading…</div>';
+        try {
+          const res = await fetch(DOCS[key].file, { cache: 'no-cache' });
+          if (!res.ok) throw new Error(res.status);
+          const md = await res.text();
+          content.innerHTML = marked.parse(md);
+          routeInternalLinks();
+        } catch (err) {
+          content.innerHTML = '<div class="text-white/50 text-sm">Couldn\'t load this page (' + err + '). '
+            + '<a class="text-emerald-400" href="' + DOCS[key].file + '">Open the raw file</a> or '
+            + '<a class="text-emerald-400" href="https://github.com/javimosch/machin-crm-cli/blob/master/docs/' + DOCS[key].file + '">view it on GitHub</a>.</div>';
+        }
+      }
+
+      // intercept clicks on links the rendered markdown itself contains (e.g. commands.md links to
+      // outbound-loop.md) so cross-doc navigation stays inside the pretty viewer too.
+      function routeInternalLinks() {
+        content.querySelectorAll('a[href]').forEach(a => {
+          const href = a.getAttribute('href');
+          const [file, hash] = href.split('#');
+          if (FILE_TO_KEY[file]) {
+            a.addEventListener('click', (e) => {
+              e.preventDefault();
+              navigate(FILE_TO_KEY[file]);
+              if (hash) setTimeout(() => document.getElementById(hash)?.scrollIntoView({ block: 'start' }), 50);
+            });
+          } else if (!href.startsWith('http') && !href.startsWith('#')) {
+            // unrecognized relative link (e.g. ../README.md) — send it to GitHub's blob view instead
+            // of a raw same-origin page load.
+            a.setAttribute('href', 'https://github.com/javimosch/machin-crm-cli/blob/master/docs/' + href);
+            a.setAttribute('target', '_blank');
+          }
+        });
+      }
+
+      function navigate(key) {
+        window.location.hash = key;
+        window.scrollTo({ top: 0, behavior: 'instant' });
+      }
+
+      window.addEventListener('hashchange', () => loadDoc(window.location.hash.slice(1)));
+      loadDoc(window.location.hash.slice(1) || 'quickstart');
+    </script>
   </body>
 </html>
