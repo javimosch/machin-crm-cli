@@ -38,6 +38,11 @@ Hosted, always-on version: **[crmd.intrane.fr](https://crmd.intrane.fr)**.
   transitions, relative due dates, ingest, the campaign lifecycle (queue-bulk → campaign →
   sent), suppression, and follow-up selection (aged/no-reply/not-queued/under-cap).
 
+## Release
+`./release.sh vX.Y.Z` cuts a GitHub release **only if the suite is green** and the tag
+matches `version_str()` — build + publish are gated on `./test.sh`. `--dry-run` runs the gate
+and build without publishing. Bump `version_str()` in `src/core.src` in lockstep with the tag.
+
 ## Commands
 ```
 crm add <name> [--company --email --phone --source --stage]   # upsert (by email)
