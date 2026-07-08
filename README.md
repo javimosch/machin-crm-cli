@@ -60,6 +60,7 @@ crm campaign [--channel email|phone] [--status queued|sent]   # the staged campa
 crm followups [--days 3 --max-touches 3] [--queue --subject S --body B]   # who is due a bump; --queue stages wave 2
 crm sent <outreach-id>        # mark sent + log the touch + advance the contact to contacted
 crm dedup [--limit N]         # read-only scan for likely-duplicate contacts (merge candidates)
+crm dedup --auto [--limit N]  # EXECUTES same_email/same_phone merges to convergence; name+company stays review-only
 crm merge <primary> <dupe>    # combine dupe into primary (fields, events, outreach), then delete dupe
 crm undo [--n N]              # revert the last N stage/next/sent/suppress/merge ops, LIFO
 ```
@@ -156,6 +157,21 @@ number once normalized to E.164 — the formatting duplicates `add` misses), **s
 time and re-run `dedup`, since earlier pairs can go stale once their id is gone. On a field
 conflict the primary's value wins (the dupe's differing value is dropped, not merged as a list);
 if both had pending campaign items, check `crm campaign` after merging before the next `send`/`call`.
+
+**The agent-facing loop — `crm dedup --auto`:** an agent shouldn't need to eyeball every pair.
+`--auto` executes the two **exact-identity** rules — `same_email` and `same_phone` — in a loop
+to convergence, and reports what it did:
+```
+crm dedup --auto              # {"auto_merged":2,"merges":[...],"needs_review":[...same_name_company...]}
+crm dedup --auto --limit 10   # cap how many pairs one call merges
+crm undo --n 2                # merged the wrong thing? undo works the same on auto-merges
+```
+`same_name_company` **never** auto-merges — two distinct real businesses (franchise locations,
+common names) can legitimately share a name+company, so that rule always comes back in
+`needs_review` for a human or agent to judge with `crm merge` one pair at a time. Every
+auto-merge is an ordinary, fully undoable op (tagged `dedup-auto` in the audit trail, vs
+`merge` for a manual one) — nothing `--auto` does is riskier or less reversible than doing it
+by hand, just faster.
 
 ### The whole outbound loop, one binary
 ```

@@ -229,5 +229,44 @@ ok "undo moves the event back to dupe"          1 "$(q "SELECT COUNT(*) FROM eve
 ok "undo moves the outreach back to dupe"       1 "$(q "SELECT COUNT(*) FROM outreach WHERE contact_id='$DID'")"
 ok "undo removes the merge-log touch"           0 "$(q "SELECT COUNT(*) FROM events WHERE contact_id='$PID' AND channel='system'")"
 
+# =====================  AGENT-FACING AUTO-DEDUP LOOP: crm dedup --auto  =====================
+
+# --- auto-merges same_email and same_phone, but NEVER same_name_company ----
+$CRM add AutoE1 --email "Auto@Case.com" --company "Auto Co" >/dev/null
+$CRM add AutoE2 --email "auto@case.com" >/dev/null
+$CRM add AutoP1 --phone "0622334455" >/dev/null
+$CRM add AutoP2 --phone "+33 6 22 33 44 55" >/dev/null
+$CRM add AutoN1 --company "Franchise Co" >/dev/null
+$CRM add AutoN2 --company "FRANCHISE CO" >/dev/null
+r=$($CRM dedup --auto)
+# (leftover same_email/same_phone pairs may exist from earlier read-only `dedup` sections that
+# were never merged — assert our two specific pairs, not an exact global count)
+ok "auto_merged >= 2" 1 "$([ "$(jq -r '.auto_merged' <<<"$r")" -ge 2 ] && echo 1 || echo 0)"
+ok "auto-merged pair tagged same_email" same_email "$(jq -r '.merges[]|select(.merged_name=="AutoE2").reason' <<<"$r")"
+ok "auto-merged pair tagged same_phone" same_phone "$(jq -r '.merges[]|select(.merged_name=="AutoP2").reason' <<<"$r")"
+ok "same_name_company surfaced in needs_review, not merged" 1 "$(jq -r '[.needs_review[]|select(.reason=="same_name_company")]|length' <<<"$r")"
+ok "same_name_company pair NOT deleted (both still exist)" 2 "$(q "SELECT COUNT(*) FROM contacts WHERE company='Franchise Co' OR company='FRANCHISE CO'")"
+
+# --- auto-merged pairs are ordinary, fully undoable ops (tagged dedup-auto) -
+r=$($CRM dedup --auto)   # a fresh no-op call this time (nothing left to auto-merge)
+ok "second auto-merge call finds nothing left" 0 "$(jq -r '.auto_merged' <<<"$r")"
+LASTAUDITCMD=$(q "SELECT cmd FROM audit ORDER BY rowid DESC LIMIT 1")
+ok "the merge op is tagged dedup-auto (distinguishable from manual)" dedup-auto "$LASTAUDITCMD"
+BEFORE_UNDO=$(q "SELECT COUNT(*) FROM contacts")
+$CRM undo >/dev/null
+AFTER_UNDO=$(q "SELECT COUNT(*) FROM contacts")
+ok "undo reverses an auto-merge (contact count +1)" 1 "$((AFTER_UNDO - BEFORE_UNDO))"
+
+# --- --limit caps how many pairs a single --auto call merges ---------------
+$CRM add LimA1 --email "Lim@Cap.com" >/dev/null
+$CRM add LimA2 --email "lim@cap.com" >/dev/null
+$CRM add LimB1 --email "Lim2@Cap.com" >/dev/null
+$CRM add LimB2 --email "lim2@cap.com" >/dev/null
+BEFORE_LIM=$(q "SELECT COUNT(*) FROM contacts")
+r=$($CRM dedup --auto --limit 1)
+ok "--limit 1 merges exactly one pair" 1 "$(jq -r '.auto_merged' <<<"$r")"
+AFTER_LIM=$(q "SELECT COUNT(*) FROM contacts")
+ok "--limit 1 leaves the second pair unmerged" 1 "$((BEFORE_LIM - AFTER_LIM))"
+
 echo "== integration: $P passed, $F failed =="
 [ "$F" -eq 0 ]
