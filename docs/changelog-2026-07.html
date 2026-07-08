@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Changelog July 2026 - crm-cli</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+    <style>
+      body { font-family: 'Geist', system-ui, sans-serif; background-color: #050505; color: #e2e8f0; }
+      h1, h2, h3 { font-family: 'Geist', system-ui, sans-serif; }
+      .tab-btn { transition: all 0.2s ease; }
+      .tab-btn.active { background-color: #1a1a1d; border-color: #3b82f6; color: #fff; }
+      .tab-content { display: none; animation: fadeIn 0.3s ease; }
+      .tab-content.active { display: block; }
+      @keyframes fadeIn { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: translateY(0); } }
+      .feature-card { background: linear-gradient(135deg, #1a1a1d 0%, #151517 100%); border: 1px solid #262629; transition: all 0.3s ease; }
+      .feature-card:hover { border-color: #3b82f6; transform: translateY(-2px); }
+    </style>
+  </head>
+  <body class="bg-[#0a0a0b] min-h-screen">
+    <div class="max-w-5xl mx-auto px-6 py-24">
+      <header class="mb-16">
+        <a href="changelog.html" class="inline-flex items-center gap-1 text-sm text-white/30 hover:text-white/70 text-sm mb-6 inline-block transition-colors"><span class="text-xs">&larr; Back tolarr;</span> Back to Changelog <span class="text-[10px]">→</span></a>
+        <h1 class="text-5xl font-bold text-white mt-4 tracking-tight">Changelog</h1>
+        <p class="text-white/40 mt-3 text-lg">July 2026</p>
+        
+        <!-- Tabs -->
+        <div class="flex gap-2 mt-8">
+          <button onclick="switchTab('product')" id="tab-product" class="tab-btn active px-5 py-2.5 rounded-lg border border-slate-700 text-slate-300 font-medium text-sm hover:border-slate-600">
+            Product
+          </button>
+          <button onclick="switchTab('technical')" id="tab-technical" class="tab-btn px-5 py-2.5 rounded-lg border border-slate-700 text-slate-300 font-medium text-sm hover:border-slate-600">
+            Technical
+          </button>
+        </div>
+      </header>
+
+      <!-- Product Changelog -->
+      <div id="content-product" class="tab-content active">
+
+        <div class="feature-card rounded-xl p-6">
+          <div class="flex items-start gap-4">
+            <div class="w-12 h-12 rounded-lg bg-blue-500/10 flex items-center justify-center flex-shrink-0">
+              <span class="text-2xl">🚀</span>
+            </div>
+            <div>
+              <h3 class="text-xl font-semibold text-white mb-2">crm-cli launches — v0.1</h3>
+              <p class="text-white/40 leading-relaxed">The agent-first CRM: a single local-first binary over SQLite, JSON in/out, no UI. Contacts + an event timeline; a webhook sink (Resend) auto-logs opens, bounces, complaints, and replies with zero data entry.</p>
+            </div>
+          </div>
+        </div>
+
+        <div class="feature-card rounded-xl p-6">
+          <div class="flex items-start gap-4">
+            <div class="w-12 h-12 rounded-lg bg-emerald-500/10 flex items-center justify-center flex-shrink-0">
+              <span class="text-2xl">📋</span>
+            </div>
+            <div>
+              <h3 class="text-xl font-semibold text-white mb-2">Campaigns live in the CRM</h3>
+              <p class="text-white/40 leading-relaxed">Stage a channel-routed campaign (<code>queue-bulk</code>) and read it back three ways — a digest, structured rows, or a send-ready JSONL — instead of juggling a scratch file. <code>followups</code> auto-selects who's due a second touch.</p>
+            </div>
+          </div>
+        </div>
+
+        <div class="feature-card rounded-xl p-6">
+          <div class="flex items-start gap-4">
+            <div class="w-12 h-12 rounded-lg bg-purple-500/10 flex items-center justify-center flex-shrink-0">
+              <span class="text-2xl">📧</span>
+            </div>
+            <div>
+              <h3 class="text-xl font-semibold text-white mb-2">Native send — email and calls</h3>
+              <p class="text-white/40 leading-relaxed"><code>crm send</code> drip-sends cold email over SMTP; <code>crm call</code> drip-dials AI cold-calls over Bland. Both bring-your-own (Resend, Bland), both suppression-checked, both self-tracking via the webhook sink.</p>
+            </div>
+          </div>
+        </div>
+
+        <div class="feature-card rounded-xl p-6">
+          <div class="flex items-start gap-4">
+            <div class="w-12 h-12 rounded-lg bg-amber-500/10 flex items-center justify-center flex-shrink-0">
+              <span class="text-2xl">📦</span>
+            </div>
+            <div>
+              <h3 class="text-xl font-semibold text-white mb-2">One-line install, self-update</h3>
+              <p class="text-white/40 leading-relaxed">A prebuilt binary — no compiler needed for most systems, with an automatic build-from-source fallback. <code>crm version</code> and <code>crm update</code> keep it current.</p>
+            </div>
+          </div>
+        </div>
+
+        <div class="feature-card rounded-xl p-6">
+          <div class="flex items-start gap-4">
+            <div class="w-12 h-12 rounded-lg bg-red-500/10 flex items-center justify-center flex-shrink-0">
+              <span class="text-2xl">🛟</span>
+            </div>
+            <div>
+              <h3 class="text-xl font-semibold text-white mb-2">Safety rails: dry-run and undo</h3>
+              <p class="text-white/40 leading-relaxed">Preview a send or a call batch with <code>--dry-run</code> — no creds, no network, no writes. Made a mistake staging, staging a follow-up, or suppressing? <code>crm undo</code> reverts it, LIFO, backed by a real audit trail.</p>
+            </div>
+          </div>
+        </div>
+
+        <div class="feature-card rounded-xl p-6">
+          <div class="flex items-start gap-4">
+            <div class="w-12 h-12 rounded-lg bg-teal-500/10 flex items-center justify-center flex-shrink-0">
+              <span class="text-2xl">🔗</span>
+            </div>
+            <div>
+              <h3 class="text-xl font-semibold text-white mb-2">Find and merge duplicate contacts</h3>
+              <p class="text-white/40 leading-relaxed"><code>crm dedup</code> finds likely duplicates from formatting differences (case, phone punctuation) that exact-match misses. <code>crm merge</code> combines them, and <code>crm dedup --auto</code> runs the safe merges automatically — leaving ambiguous name-only matches for a human to judge.</p>
+            </div>
+          </div>
+        </div>
+
+        <div class="feature-card rounded-xl p-6">
+          <div class="flex items-start gap-4">
+            <div class="w-12 h-12 rounded-lg bg-sky-500/10 flex items-center justify-center flex-shrink-0">
+              <span class="text-2xl">✅</span>
+            </div>
+            <div>
+              <h3 class="text-xl font-semibold text-white mb-2">A real test suite, and a release gate</h3>
+              <p class="text-white/40 leading-relaxed">100 automated checks (unit + integration) now guard every command's business rules. Releases run through a gate that refuses to ship if the suite is red.</p>
+            </div>
+          </div>
+        </div>
+
+      </div>
+
+      <!-- Technical Changelog -->
+      <div id="content-technical" class="tab-content">
+        <div class="space-y-8">
+
+        <section>
+          <h2 class="text-2xl font-semibold text-brand-400 mb-4 flex items-center gap-2">
+            <span>🚀</span> Features
+          </h2>
+          <ul class="space-y-2 text-slate-300">
+            <li><span class="text-slate-500 text-sm mr-3">[08/07]</span>feat: crm dedup --auto — the agent-facing auto-dedup loop</li>
+            <li><span class="text-slate-500 text-sm mr-3">[08/07]</span>feat: entity resolution — crm dedup + crm merge (undoable)</li>
+            <li><span class="text-slate-500 text-sm mr-3">[08/07]</span>feat: safety rails — crm undo (audit trail) + --dry-run on send/call</li>
+            <li><span class="text-slate-500 text-sm mr-3">[07/07]</span>feat: prebuilt-release install + crm version/update (fix onboarding)</li>
+            <li><span class="text-slate-500 text-sm mr-3">[07/07]</span>feat: native call transport — crm call (Bland, BYO) + /bland outcome webhook</li>
+            <li><span class="text-slate-500 text-sm mr-3">[07/07]</span>feat: install.sh — build-from-source installer (fetches machin if missing)</li>
+            <li><span class="text-slate-500 text-sm mr-3">[07/07]</span>feat: native email send transport — crm send (SMTP) + suppression</li>
+            <li><span class="text-slate-500 text-sm mr-3">[07/07]</span>feat: read a campaign back — digest / structured / send-ready jsonl</li>
+            <li><span class="text-slate-500 text-sm mr-3">[07/07]</span>feat: campaigns live in the CRM — queue / campaign / sent</li>
+          </ul>
+        </section>
+
+        <section>
+          <h2 class="text-2xl font-semibold text-emerald-400 mb-4 flex items-center gap-2">
+            <span>📚</span> Documentation
+          </h2>
+          <ul class="space-y-2 text-slate-300">
+            <li><span class="text-slate-500 text-sm mr-3">[07/07]</span>docs(gtm): crmd soft-launch cold-mail copy (EN/FR)</li>
+            <li><span class="text-slate-500 text-sm mr-3">[07/07]</span>docs(gtm): launch social copy (X/HN/Reddit/Bluesky; LinkedIn skipped)</li>
+            <li><span class="text-slate-500 text-sm mr-3">[07/07]</span>docs: prebuilt curl install + crm version/update + runtime deps</li>
+          </ul>
+        </section>
+
+        <section>
+          <h2 class="text-2xl font-semibold text-blue-400 mb-4 flex items-center gap-2">
+            <span>🧪</span> Testing
+          </h2>
+          <ul class="space-y-2 text-slate-300">
+            <li><span class="text-slate-500 text-sm mr-3">[08/07]</span>test: DB-backed integration suite (22 checks) for command business rules</li>
+            <li><span class="text-slate-500 text-sm mr-3">[08/07]</span>test: add unit tests + factor pure helpers into src/core.src</li>
+          </ul>
+        </section>
+
+        <section>
+          <h2 class="text-2xl font-semibold text-purple-400 mb-4 flex items-center gap-2">
+            <span>💼</span> Other
+          </h2>
+          <ul class="space-y-2 text-slate-300">
+            <li><span class="text-slate-500 text-sm mr-3">[08/07]</span>build: release.sh — gate releases on the test suite</li>
+            <li><span class="text-slate-500 text-sm mr-3">[07/07]</span>smtp: Reply-To header (SMTP_REPLY_TO) + bare-address envelope (v0.2.1)</li>
+            <li><span class="text-slate-500 text-sm mr-3">[07/07]</span>followups: the second half of a campaign (v0.2.0)</li>
+            <li><span class="text-slate-500 text-sm mr-3">[06/07]</span>crm serve: forward inbound replies to CRM_FORWARD_TO (fetch body via Received API, send via Resend, reply-to=lead)</li>
+            <li><span class="text-slate-500 text-sm mr-3">[06/07]</span>crm serve: harden email.received handler (from may be string/object/array)</li>
+            <li><span class="text-slate-500 text-sm mr-3">[06/07]</span>crm serve: add authenticated POST /sink — remote touch-logging so outreach writes one canonical DB</li>
+            <li><span class="text-slate-500 text-sm mr-3">[04/07]</span>crm serve: Resend webhook sink (opens/bounces/complaints/replies -> CRM), Svix-verified</li>
+            <li><span class="text-slate-500 text-sm mr-3">[04/07]</span>readme: generalize the outreach-machine references for public release</li>
+            <li><span class="text-slate-500 text-sm mr-3">[04/07]</span>crm-cli: dedupe/resolve by phone too (call leads have no email)</li>
+            <li><span class="text-slate-500 text-sm mr-3">[04/07]</span>crm-cli v0.1 — agent-first, local-first CRM (SQLite single binary)</li>
+          </ul>
+        </section>
+        </div>
+      </div>
+    </div>
+
+    <script>
+      function switchTab(tab) {
+        document.querySelectorAll('.tab-content').forEach(el => el.classList.remove('active'));
+        document.querySelectorAll('.tab-btn').forEach(el => el.classList.remove('active'));
+        document.getElementById('content-' + tab).classList.add('active');
+        document.getElementById('tab-' + tab).classList.add('active');
+      }
+    </script>
+  </body>
+</html>
