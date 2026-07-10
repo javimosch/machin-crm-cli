@@ -320,5 +320,22 @@ r2=$($CRM list --limit 10 --offset 10)
 ok "list --offset advances the page" 10 "$(jq -r .offset <<<"$r2")"
 ok "list page 1 and page 2 don't overlap" "" "$(comm -12 <(jq -r '.contacts[].id' <<<"$r" | sort) <(jq -r '.contacts[].id' <<<"$r2" | sort))"
 
+# =====================  REGRESSION: suppress_set (batched, not per-row) =====================
+# send/call --dry-run's suppression check moved from one SQL query per outreach row to one
+# fetch-all-suppressed-addresses-once set (measured: 3.60min -> ~1s for a few thousand items).
+# Confirm the SET correctly flags MULTIPLE simultaneously-suppressed addresses in one call, not
+# just a single one — the thing that would break if the batching introduced an off-by-one or
+# only-checks-the-last-suppressed-address bug.
+$CRM add MultiA --email multia@bat.com >/dev/null
+$CRM add MultiB --email multib@bat.com >/dev/null
+$CRM add MultiC --email multic@bat.com >/dev/null
+$CRM suppress multia@bat.com >/dev/null
+$CRM suppress multib@bat.com >/dev/null
+echo '[{"contact":"multia@bat.com","channel":"email","subject":"S","body":"B"},{"contact":"multib@bat.com","channel":"email","subject":"S","body":"B"},{"contact":"multic@bat.com","channel":"email","subject":"S","body":"B"}]' | $CRM queue-bulk - >/dev/null
+r=$($CRM send --dry-run)
+ok "batched suppress: first suppressed address flagged"  skip_suppressed "$(jq -r '.preview[]|select(.to=="multia@bat.com").action' <<<"$r")"
+ok "batched suppress: second suppressed address flagged" skip_suppressed "$(jq -r '.preview[]|select(.to=="multib@bat.com").action' <<<"$r")"
+ok "batched suppress: non-suppressed address unaffected"  send            "$(jq -r '.preview[]|select(.to=="multic@bat.com").action' <<<"$r")"
+
 echo "== integration: $P passed, $F failed =="
 [ "$F" -eq 0 ]

@@ -31,6 +31,7 @@ type Event struct {
 type Duerow struct { d string }
 type Idrow struct { id string }
 type Opidrow struct { op_id string }
+type Suppressrow struct { addr string }
 type Auditrow struct {
     id string
     op_id string
@@ -825,6 +826,23 @@ func mail_footer() (f) {
     }
 }
 
+// suppress_set — every suppressed address as an in-memory set (map[string]int; membership via
+// has()), fetched ONCE per command instead of one individual SELECT per outreach row. This
+// fixes a real O(n) query-per-row pattern: measured at 3.60 minutes for 8,053 items in
+// `send --dry-run` at 10k contacts (a READ-ONLY preview), and at 50k scale the same pattern's
+// sustained write/query load contributed to a real host disk-I/O incident during load testing
+// — see docs/architecture.md. `send`/`call` and both their `--dry-run` previews all share this.
+func suppress_set(db) (set) {
+    set = make(map[string]int)
+    rows := sqlite_query(db, "SELECT addr FROM suppress", []string{})
+    all := parse(rows, []Suppressrow{})
+    i := 0
+    for i < len(all) {
+        set[all[i].addr] = 1
+        i = i + 1
+    }
+}
+
 // crm send [--limit N]  -> drip-send QUEUED email outreach via SMTP (Resend/any relay).
 // Suppression-checked, unsubscribe footer, polite 2s drip. Marks each sent|error, logs the
 // touch, advances the contact stage. Phone outreach is exported (campaign --channel phone
@@ -834,6 +852,7 @@ func cmd_send(db, a) {
     limit := flagv(a, "--limit", "20")
     rows := sqlite_query(db, "SELECT o.id AS oid, o.contact_id AS cid, c.email AS email, o.subject AS subject, o.body AS body FROM outreach o JOIN contacts c ON c.id=o.contact_id WHERE o.status='queued' AND o.channel='email' AND c.email!='' ORDER BY o.created LIMIT " + limit, []string{})
     todo := parse(rows, []Sendrow{})
+    suppressed := suppress_set(db)
 
     // --dry-run: compose the preview (incl. the suppression check) without SMTP creds, a
     // network call, or touching the DB — nothing here can send an email.
@@ -844,9 +863,8 @@ func cmd_send(db, a) {
         i := 0
         for i < len(todo) {
             m := todo[i]
-            srows := sqlite_query(db, "SELECT addr FROM suppress WHERE addr=?", []string{to_lower(m.email)})
             action := "send"
-            if srows != "[]" { action = "skip_suppressed"; skip = skip + 1 } else { would = would + 1 }
+            if has(suppressed, to_lower(m.email)) { action = "skip_suppressed"; skip = skip + 1 } else { would = would + 1 }
             if i > 0 { preview = preview + "," }
             preview = preview + "{\"to\":\"" + esc(m.email) + "\",\"subject\":\"" + esc(m.subject) + "\",\"action\":\"" + action + "\"}"
             i = i + 1
@@ -874,8 +892,7 @@ func cmd_send(db, a) {
     for i < len(todo) {
         m := todo[i]
         addr := to_lower(m.email)
-        srows := sqlite_query(db, "SELECT addr FROM suppress WHERE addr=?", []string{addr})
-        if srows != "[]" {
+        if has(suppressed, addr) {
             sqlite_exec(db, "UPDATE outreach SET status='suppressed' WHERE id=?", []string{m.oid})
             supp = supp + 1
             i = i + 1
@@ -913,6 +930,7 @@ func cmd_call(db, a) {
     limit := flagv(a, "--limit", "20")
     rows := sqlite_query(db, "SELECT o.id AS oid, o.contact_id AS cid, c.phone AS phone, c.name AS company, o.body AS body FROM outreach o JOIN contacts c ON c.id=o.contact_id WHERE o.status='queued' AND o.channel='phone' AND c.phone!='' ORDER BY o.created LIMIT " + limit, []string{})
     todo := parse(rows, []Callrow{})
+    suppressed := suppress_set(db)
 
     // --dry-run: compose the E.164 + suppression preview without a Bland key or any dial.
     if has_flag(a, "--dry-run") == 1 {
@@ -923,9 +941,8 @@ func cmd_call(db, a) {
         for i < len(todo) {
             m := todo[i]
             num := e164(m.phone)
-            srows := sqlite_query(db, "SELECT addr FROM suppress WHERE addr=? OR addr=?", []string{num, m.phone})
             action := "call"
-            if srows != "[]" { action = "skip_suppressed"; skip = skip + 1 } else { would = would + 1 }
+            if has(suppressed, num) || has(suppressed, m.phone) { action = "skip_suppressed"; skip = skip + 1 } else { would = would + 1 }
             if i > 0 { preview = preview + "," }
             preview = preview + "{\"to\":\"" + esc(num) + "\",\"company\":\"" + esc(m.company) + "\",\"action\":\"" + action + "\"}"
             i = i + 1
@@ -951,8 +968,7 @@ func cmd_call(db, a) {
     for i < len(todo) {
         m := todo[i]
         num := e164(m.phone)
-        srows := sqlite_query(db, "SELECT addr FROM suppress WHERE addr=? OR addr=?", []string{num, m.phone})
-        if srows != "[]" {
+        if has(suppressed, num) || has(suppressed, m.phone) {
             sqlite_exec(db, "UPDATE outreach SET status='suppressed' WHERE id=?", []string{m.oid})
             supp = supp + 1
             i = i + 1
