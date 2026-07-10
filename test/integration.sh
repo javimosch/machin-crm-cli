@@ -285,5 +285,26 @@ ok "--limit 1 merges exactly one pair" 1 "$(jq -r '.auto_merged' <<<"$r")"
 AFTER_LIM=$(q "SELECT COUNT(*) FROM contacts")
 ok "--limit 1 leaves the second pair unmerged" 1 "$((BEFORE_LIM - AFTER_LIM))"
 
+# =====================  STDIN INPUT: crm ingest -  /  crm queue-bulk -  =====================
+# crm ingest/queue-bulk pass their JSON payload as an argv argument, which Linux caps at
+# MAX_ARG_STRLEN (~128 KiB per arg) — confirmed empirically (a load test) to break real ingest
+# calls around 1,100-1,300 typical contacts, with no workaround before this. `-` reads the
+# payload from stdin instead, sidestepping the OS ceiling entirely.
+
+# --- ingest - reads from stdin, behaves identically to the argv form -------
+r=$(echo '[{"name":"StdinA","email":"stdina@z.com"}]' | $CRM ingest -)
+ok "ingest - reads from stdin" 1 "$(jq -r .added <<<"$r")"
+ok "ingest - contact actually landed" StdinA "$($CRM show stdina@z.com | jq -r '.contact[0].name')"
+
+# --- queue-bulk - reads from stdin too --------------------------------------
+$CRM add StdinB --email stdinb@z.com >/dev/null
+r=$(echo '[{"contact":"stdinb@z.com","channel":"email","subject":"S","body":"B"}]' | $CRM queue-bulk -)
+ok "queue-bulk - reads from stdin" 1 "$(jq -r .queued <<<"$r")"
+ok "queue-bulk - outreach actually landed" queued "$(q "SELECT status FROM outreach WHERE contact_id=(SELECT id FROM contacts WHERE email='stdinb@z.com')")"
+
+# --- the plain argv form still works unchanged for everyone not using '-' --
+r=$($CRM ingest '[{"name":"ArgvStill","email":"argvstill@z.com"}]')
+ok "ingest (argv form) still works" 1 "$(jq -r .added <<<"$r")"
+
 echo "== integration: $P passed, $F failed =="
 [ "$F" -eq 0 ]

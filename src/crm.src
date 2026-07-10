@@ -304,11 +304,23 @@ func cmd_pipeline(db) {
     say("{\"ok\":true,\"pipeline\":" + rows + "}")
 }
 
-// crm ingest '<json-array>'  -> bulk upsert contacts from grepapi leads (the sink entrypoint).
-// Each item: {name, company, email, phone, source, stage}. Upserts by email when present.
+// json_arg — the JSON payload for a command taking one positional JSON blob: a[2] normally, or
+// stdin if the caller passed "-". Linux caps a single argv string at MAX_ARG_STRLEN (128 KiB;
+// confirmed empirically to break around 1,100-1,300 typical contacts) — piping a large batch
+// through stdin instead sidesteps that ceiling entirely. `crm ingest -`/`crm queue-bulk -` with
+// the JSON on stdin; unchanged for everyone already passing it as an argument.
+func json_arg(a) (payload) {
+    payload = a[2]
+    if payload == "-" { payload = read_stdin() }
+}
+
+// crm ingest '<json-array>' | crm ingest -   -> bulk upsert contacts from grepapi leads (the
+// sink entrypoint). Each item: {name, company, email, phone, source, stage}. Upserts by email
+// when present. `-` reads the JSON from stdin instead of argv — use for large batches (see
+// json_arg).
 func cmd_ingest(db, a) {
-    if len(a) < 3 { die(80, "usage: crm ingest '<json array of {name,company,email,phone,source,stage}>'") }
-    items := parse(a[2], []Contact{})
+    if len(a) < 3 { die(80, "usage: crm ingest '<json array of {name,company,email,phone,source,stage}>' | crm ingest -  (reads JSON from stdin)") }
+    items := parse(json_arg(a), []Contact{})
     n := now()
     added := 0
     i := 0
@@ -589,7 +601,7 @@ func cmd_update() {
 }
 
 func cmd_help() {
-    say("{\"ok\":true,\"name\":\"crm-cli\",\"version\":\"" + version_str() + "\",\"tagline\":\"the agent-first CRM — sink for the outreach machine\",\"db\":\"$CRM_DB or ~/.crm-cli.db\",\"commands\":{\"add\":\"add <name> [--company --email --phone --source --stage]\",\"log\":\"log <contact> <channel> <summary> [--ref --direction]\",\"stage\":\"stage <contact> <new|contacted|replied|meeting|deal|won|lost>\",\"next\":\"next <contact> <action> [--due YYYY-MM-DD|+N days]\",\"show\":\"show <contact>\",\"list\":\"list [--stage X]\",\"due\":\"due (next steps due today/overdue)\",\"pipeline\":\"pipeline (counts by stage)\",\"ingest\":\"ingest '<json>' (bulk from grepapi leads)\",\"queue\":\"queue <contact> <email|phone> [--subject --body] (stage one outreach)\",\"queue-bulk\":\"queue-bulk '<json [{contact,channel,subject,body}]>' (load a campaign)\",\"campaign\":\"campaign [--channel email|phone] [--status queued|sent] (the staged campaign as JSON)\",\"followups\":\"followups [--days 3 --max-touches 3 --limit 200] [--queue --subject S --body B] (who is due a bump; --queue stages wave 2, {{name}}/{{company}} substituted)\",\"sent\":\"sent <outreach-id> (mark sent + log touch + advance stage)\",\"send\":\"send [--limit N] [--dry-run] (drip-send queued EMAIL outreach via SMTP; needs SMTP_* env; suppression + footer + stage advance; --dry-run previews with no creds/network/DB writes)\",\"call\":\"call [--limit N] [--dry-run] (drip-dispatch queued PHONE outreach as AI cold-calls via Bland; needs BLAND_API_KEY; outcomes return via serve POST /bland; --dry-run previews with no key/network/DB writes)\",\"suppress\":\"suppress <email|phone> [reason] (never contact again; alias unsub/dnc; undoable)\",\"undo\":\"undo [--n N] (revert the last N stage/next/sent/suppress/merge operations, LIFO; send/call are NOT undoable — an email/call already left)\",\"dedup\":\"dedup [--limit N] (read-only preview of likely-duplicate contacts by same_email/same_phone/same_name_company); dedup --auto [--limit N] (EXECUTES same_email/same_phone merges to convergence — the exact-identity rules only; same_name_company always stays review-only; undoable)\",\"merge\":\"merge <primary> <dupe> (combine dupe into primary — fields, events, outreach — then delete dupe; undoable)\",\"serve\":\"serve [port] (webhook sink: POST /resend email events + POST /bland call outcomes -> the CRM; bounces/complaints auto-suppress)\",\"version\":\"version (the installed release)\",\"update\":\"update (self-update to the latest release)\"}}")
+    say("{\"ok\":true,\"name\":\"crm-cli\",\"version\":\"" + version_str() + "\",\"tagline\":\"the agent-first CRM — sink for the outreach machine\",\"db\":\"$CRM_DB or ~/.crm-cli.db\",\"commands\":{\"add\":\"add <name> [--company --email --phone --source --stage]\",\"log\":\"log <contact> <channel> <summary> [--ref --direction]\",\"stage\":\"stage <contact> <new|contacted|replied|meeting|deal|won|lost>\",\"next\":\"next <contact> <action> [--due YYYY-MM-DD|+N days]\",\"show\":\"show <contact>\",\"list\":\"list [--stage X]\",\"due\":\"due (next steps due today/overdue)\",\"pipeline\":\"pipeline (counts by stage)\",\"ingest\":\"ingest '<json>' | ingest - (bulk from grepapi leads; - reads JSON from stdin for large batches, argv has an OS length limit)\",\"queue\":\"queue <contact> <email|phone> [--subject --body] (stage one outreach)\",\"queue-bulk\":\"queue-bulk '<json [{contact,channel,subject,body}]>' | queue-bulk - (load a campaign; - reads JSON from stdin for large batches)\",\"campaign\":\"campaign [--channel email|phone] [--status queued|sent] (the staged campaign as JSON)\",\"followups\":\"followups [--days 3 --max-touches 3 --limit 200] [--queue --subject S --body B] (who is due a bump; --queue stages wave 2, {{name}}/{{company}} substituted)\",\"sent\":\"sent <outreach-id> (mark sent + log touch + advance stage)\",\"send\":\"send [--limit N] [--dry-run] (drip-send queued EMAIL outreach via SMTP; needs SMTP_* env; suppression + footer + stage advance; --dry-run previews with no creds/network/DB writes)\",\"call\":\"call [--limit N] [--dry-run] (drip-dispatch queued PHONE outreach as AI cold-calls via Bland; needs BLAND_API_KEY; outcomes return via serve POST /bland; --dry-run previews with no key/network/DB writes)\",\"suppress\":\"suppress <email|phone> [reason] (never contact again; alias unsub/dnc; undoable)\",\"undo\":\"undo [--n N] (revert the last N stage/next/sent/suppress/merge operations, LIFO; send/call are NOT undoable — an email/call already left)\",\"dedup\":\"dedup [--limit N] (read-only preview of likely-duplicate contacts by same_email/same_phone/same_name_company); dedup --auto [--limit N] (EXECUTES same_email/same_phone merges to convergence — the exact-identity rules only; same_name_company always stays review-only; undoable)\",\"merge\":\"merge <primary> <dupe> (combine dupe into primary — fields, events, outreach — then delete dupe; undoable)\",\"serve\":\"serve [port] (webhook sink: POST /resend email events + POST /bland call outcomes -> the CRM; bounces/complaints auto-suppress)\",\"version\":\"version (the installed release)\",\"update\":\"update (self-update to the latest release)\"}}")
 }
 
 // crm queue <contact> <channel> [--subject X --body X]  -> stage one outreach message.
@@ -605,12 +617,13 @@ func cmd_queue(db, a) {
     say("{\"ok\":true,\"queued\":1,\"channel\":\"" + esc(ch) + "\"}")
 }
 
-// crm queue-bulk '<json array of {contact,channel,subject,body}>'  -> load a whole campaign.
-// Channel routing is the CALLER's job (email if the lead has one, else phone) — this just
-// stores what it's given, so the CRM is the single source of truth for the campaign.
+// crm queue-bulk '<json array of {contact,channel,subject,body}>' | crm queue-bulk -  -> load
+// a whole campaign. Channel routing is the CALLER's job (email if the lead has one, else
+// phone) — this just stores what it's given, so the CRM is the single source of truth for the
+// campaign. `-` reads the JSON from stdin instead of argv — use for large batches (see json_arg).
 func cmd_queue_bulk(db, a) {
-    if len(a) < 3 { die(80, "usage: crm queue-bulk '<json array of {contact,channel,subject,body}>'") }
-    items := parse(a[2], []Qitem{})
+    if len(a) < 3 { die(80, "usage: crm queue-bulk '<json array of {contact,channel,subject,body}>' | crm queue-bulk -  (reads JSON from stdin)") }
+    items := parse(json_arg(a), []Qitem{})
     n := now()
     added := 0
     miss := 0

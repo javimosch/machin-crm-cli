@@ -40,11 +40,17 @@ Contacts whose `next_due` is today or earlier.
 ### `crm pipeline`
 Contact counts grouped by stage.
 
-### `crm ingest '<json>'`
+### `crm ingest '<json>'` / `crm ingest -`
 Bulk-upsert an array of `{"name":...,"email":...,"phone":...,"source":...}` — the sink for any lead source (a scraper, another CLI, a spreadsheet export).
 ```sh
 crm ingest '[{"name":"Bo","email":"bo@y.com"},{"name":"Cy","email":"cy@z.com","phone":"0611223344"}]'
 # {"ok":true,"ingested":2,"added":2}
+```
+For large batches, pass `-` and pipe the JSON on stdin instead — Linux caps a single command-line
+argument around 128 KiB (roughly 1,100-1,300 typical contacts), which the argv form will hit with
+an `Argument list too long` error; stdin has no such limit:
+```sh
+cat leads.json | crm ingest -
 ```
 
 ## Campaigns — see [The outbound loop](outbound-loop.md) for the full lifecycle
@@ -52,8 +58,8 @@ crm ingest '[{"name":"Bo","email":"bo@y.com"},{"name":"Cy","email":"cy@z.com","p
 ### `crm queue <contact> <email|phone> [--subject X] [--body X]`
 Stage one outreach message.
 
-### `crm queue-bulk '<json>'`
-Load a whole channel-routed campaign: `[{"contact":"...","channel":"email|phone","subject":"...","body":"..."}]`.
+### `crm queue-bulk '<json>'` / `crm queue-bulk -`
+Load a whole channel-routed campaign: `[{"contact":"...","channel":"email|phone","subject":"...","body":"..."}]`. Same `-`/stdin option as `ingest` for large campaigns.
 
 ### `crm campaign [--channel email|phone] [--status queued|sent] [--summary] [--jsonl]`
 Read the campaign back. `--summary` = counts by channel×status. `--jsonl` = one send-ready payload per line (`{to,subject,body,outreach}` for email, `{phone,company,script,outreach}` for phone). Neither flag = the full structured rows as JSON.

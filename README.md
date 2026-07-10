@@ -59,9 +59,9 @@ crm show <contact>            # contact + full timeline
 crm list [--stage X]
 crm due                       # next steps due today / overdue
 crm pipeline                  # counts by stage
-crm ingest '<json>'           # bulk upsert from grepapi leads (the sink)
+crm ingest '<json>' | crm ingest -        # bulk upsert from grepapi leads (the sink); - reads stdin for large batches
 crm queue <contact> <email|phone> [--subject --body]   # stage one outreach
-crm queue-bulk '<json>'       # load a whole channel-routed campaign (array of {contact,channel,subject,body})
+crm queue-bulk '<json>' | crm queue-bulk -   # load a whole channel-routed campaign; - reads stdin for large batches
 crm campaign [--channel email|phone] [--status queued|sent]   # the staged campaign as JSON
 crm followups [--days 3 --max-touches 3] [--queue --subject S --body B]   # who is due a bump; --queue stages wave 2
 crm sent <outreach-id>        # mark sent + log the touch + advance the contact to contacted
