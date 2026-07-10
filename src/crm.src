@@ -277,17 +277,31 @@ func cmd_show(db, a) {
     say("{\"ok\":true,\"contact\":" + c + ",\"timeline\":" + ev + "}")
 }
 
-// crm list [--stage X]
+// crm list [--stage X] [--limit N] [--offset N]  -> a page of contacts, most-recently-updated
+// first, plus total/returned/offset/limit so a caller can tell whether it's seeing everything
+// or needs to page further (crm list --offset 500 --limit 500, ...). The old version silently
+// capped at 500 with zero indication more existed — a load test caught this: an agent
+// enumerating a >500-contact table saw only the newest 500 with no signal anything was missing.
 func cmd_list(db, a) {
     stage := flagv(a, "--stage", "")
+    limit := parse_int(flagv(a, "--limit", "500"))
+    if limit <= 0 || limit > 5000 { limit = 500 }
+    offset := parse_int(flagv(a, "--offset", "0"))
+    if offset < 0 { offset = 0 }
+
     rows := ""
+    trows := ""
     if stage == "" {
-        rows = sqlite_query(db, "SELECT id, name, company, email, stage, next_action, next_due FROM contacts ORDER BY updated DESC LIMIT 500", []string{})
+        rows = sqlite_query(db, "SELECT id, name, company, email, stage, next_action, next_due FROM contacts ORDER BY updated DESC LIMIT " + str(limit) + " OFFSET " + str(offset), []string{})
+        trows = sqlite_query(db, "SELECT COUNT(*) AS n FROM contacts", []string{})
     } else {
-        rows = sqlite_query(db, "SELECT id, name, company, email, stage, next_action, next_due FROM contacts WHERE stage=? ORDER BY updated DESC LIMIT 500", []string{stage})
+        rows = sqlite_query(db, "SELECT id, name, company, email, stage, next_action, next_due FROM contacts WHERE stage=? ORDER BY updated DESC LIMIT " + str(limit) + " OFFSET " + str(offset), []string{stage})
+        trows = sqlite_query(db, "SELECT COUNT(*) AS n FROM contacts WHERE stage=?", []string{stage})
     }
+    returned := parse(rows, []Idrow{})
+    total, _ := json_get(trows, "[0].n")
     sqlite_close(db)
-    say("{\"ok\":true,\"contacts\":" + rows + "}")
+    say("{\"ok\":true,\"contacts\":" + rows + ",\"total\":" + total + ",\"returned\":" + str(len(returned)) + ",\"offset\":" + str(offset) + ",\"limit\":" + str(limit) + "}")
 }
 
 // crm due  -> contacts whose next step is due today or overdue (the "what's next" view)
@@ -601,7 +615,7 @@ func cmd_update() {
 }
 
 func cmd_help() {
-    say("{\"ok\":true,\"name\":\"crm-cli\",\"version\":\"" + version_str() + "\",\"tagline\":\"the agent-first CRM — sink for the outreach machine\",\"db\":\"$CRM_DB or ~/.crm-cli.db\",\"commands\":{\"add\":\"add <name> [--company --email --phone --source --stage]\",\"log\":\"log <contact> <channel> <summary> [--ref --direction]\",\"stage\":\"stage <contact> <new|contacted|replied|meeting|deal|won|lost>\",\"next\":\"next <contact> <action> [--due YYYY-MM-DD|+N days]\",\"show\":\"show <contact>\",\"list\":\"list [--stage X]\",\"due\":\"due (next steps due today/overdue)\",\"pipeline\":\"pipeline (counts by stage)\",\"ingest\":\"ingest '<json>' | ingest - (bulk from grepapi leads; - reads JSON from stdin for large batches, argv has an OS length limit)\",\"queue\":\"queue <contact> <email|phone> [--subject --body] (stage one outreach)\",\"queue-bulk\":\"queue-bulk '<json [{contact,channel,subject,body}]>' | queue-bulk - (load a campaign; - reads JSON from stdin for large batches)\",\"campaign\":\"campaign [--channel email|phone] [--status queued|sent] (the staged campaign as JSON)\",\"followups\":\"followups [--days 3 --max-touches 3 --limit 200] [--queue --subject S --body B] (who is due a bump; --queue stages wave 2, {{name}}/{{company}} substituted)\",\"sent\":\"sent <outreach-id> (mark sent + log touch + advance stage)\",\"send\":\"send [--limit N] [--dry-run] (drip-send queued EMAIL outreach via SMTP; needs SMTP_* env; suppression + footer + stage advance; --dry-run previews with no creds/network/DB writes)\",\"call\":\"call [--limit N] [--dry-run] (drip-dispatch queued PHONE outreach as AI cold-calls via Bland; needs BLAND_API_KEY; outcomes return via serve POST /bland; --dry-run previews with no key/network/DB writes)\",\"suppress\":\"suppress <email|phone> [reason] (never contact again; alias unsub/dnc; undoable)\",\"undo\":\"undo [--n N] (revert the last N stage/next/sent/suppress/merge operations, LIFO; send/call are NOT undoable — an email/call already left)\",\"dedup\":\"dedup [--limit N] (read-only preview of likely-duplicate contacts by same_email/same_phone/same_name_company); dedup --auto [--limit N] (EXECUTES same_email/same_phone merges to convergence — the exact-identity rules only; same_name_company always stays review-only; undoable)\",\"merge\":\"merge <primary> <dupe> (combine dupe into primary — fields, events, outreach — then delete dupe; undoable)\",\"serve\":\"serve [port] (webhook sink: POST /resend email events + POST /bland call outcomes -> the CRM; bounces/complaints auto-suppress)\",\"version\":\"version (the installed release)\",\"update\":\"update (self-update to the latest release)\"}}")
+    say("{\"ok\":true,\"name\":\"crm-cli\",\"version\":\"" + version_str() + "\",\"tagline\":\"the agent-first CRM — sink for the outreach machine\",\"db\":\"$CRM_DB or ~/.crm-cli.db\",\"commands\":{\"add\":\"add <name> [--company --email --phone --source --stage]\",\"log\":\"log <contact> <channel> <summary> [--ref --direction]\",\"stage\":\"stage <contact> <new|contacted|replied|meeting|deal|won|lost>\",\"next\":\"next <contact> <action> [--due YYYY-MM-DD|+N days]\",\"show\":\"show <contact>\",\"list\":\"list [--stage X] [--limit N] [--offset N] (paginated; response has total/returned/offset/limit so you know if there's more to page through)\",\"due\":\"due (next steps due today/overdue)\",\"pipeline\":\"pipeline (counts by stage)\",\"ingest\":\"ingest '<json>' | ingest - (bulk from grepapi leads; - reads JSON from stdin for large batches, argv has an OS length limit)\",\"queue\":\"queue <contact> <email|phone> [--subject --body] (stage one outreach)\",\"queue-bulk\":\"queue-bulk '<json [{contact,channel,subject,body}]>' | queue-bulk - (load a campaign; - reads JSON from stdin for large batches)\",\"campaign\":\"campaign [--channel email|phone] [--status queued|sent] (the staged campaign as JSON)\",\"followups\":\"followups [--days 3 --max-touches 3 --limit 200] [--queue --subject S --body B] (who is due a bump; --queue stages wave 2, {{name}}/{{company}} substituted)\",\"sent\":\"sent <outreach-id> (mark sent + log touch + advance stage)\",\"send\":\"send [--limit N] [--dry-run] (drip-send queued EMAIL outreach via SMTP; needs SMTP_* env; suppression + footer + stage advance; --dry-run previews with no creds/network/DB writes)\",\"call\":\"call [--limit N] [--dry-run] (drip-dispatch queued PHONE outreach as AI cold-calls via Bland; needs BLAND_API_KEY; outcomes return via serve POST /bland; --dry-run previews with no key/network/DB writes)\",\"suppress\":\"suppress <email|phone> [reason] (never contact again; alias unsub/dnc; undoable)\",\"undo\":\"undo [--n N] (revert the last N stage/next/sent/suppress/merge operations, LIFO; send/call are NOT undoable — an email/call already left)\",\"dedup\":\"dedup [--limit N] (read-only preview of likely-duplicate contacts by same_email/same_phone/same_name_company); dedup --auto [--limit N] (EXECUTES same_email/same_phone merges to convergence — the exact-identity rules only; same_name_company always stays review-only; undoable)\",\"merge\":\"merge <primary> <dupe> (combine dupe into primary — fields, events, outreach — then delete dupe; undoable)\",\"serve\":\"serve [port] (webhook sink: POST /resend email events + POST /bland call outcomes -> the CRM; bounces/complaints auto-suppress)\",\"version\":\"version (the installed release)\",\"update\":\"update (self-update to the latest release)\"}}")
 }
 
 // crm queue <contact> <channel> [--subject X --body X]  -> stage one outreach message.

@@ -306,5 +306,19 @@ ok "queue-bulk - outreach actually landed" queued "$(q "SELECT status FROM outre
 r=$($CRM ingest '[{"name":"ArgvStill","email":"argvstill@z.com"}]')
 ok "ingest (argv form) still works" 1 "$(jq -r .added <<<"$r")"
 
+# =====================  PAGINATION: crm list  =====================
+# The old `crm list` silently capped at 500 with no total/returned/offset/limit metadata — an
+# agent enumerating a >500-contact table saw only the newest 500 with zero signal anything was
+# missing. Seed enough contacts to force a second page and check the metadata + full coverage.
+for i in $(seq 1 30); do $CRM add "Pg${i}" --email "pg${i}@page.com" >/dev/null; done
+TOTAL_NOW=$(q "SELECT COUNT(*) FROM contacts")
+r=$($CRM list --limit 10)
+ok "list reports total (not silently missing)" "$TOTAL_NOW" "$(jq -r .total <<<"$r")"
+ok "list respects --limit" 10 "$(jq -r .returned <<<"$r")"
+ok "list --limit caps contacts array too" 10 "$(jq -r '.contacts|length' <<<"$r")"
+r2=$($CRM list --limit 10 --offset 10)
+ok "list --offset advances the page" 10 "$(jq -r .offset <<<"$r2")"
+ok "list page 1 and page 2 don't overlap" "" "$(comm -12 <(jq -r '.contacts[].id' <<<"$r" | sort) <(jq -r '.contacts[].id' <<<"$r2" | sort))"
+
 echo "== integration: $P passed, $F failed =="
 [ "$F" -eq 0 ]

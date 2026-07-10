@@ -31,8 +31,14 @@ crm next acme "send proposal" --due "+3 days"
 ### `crm show <contact>`
 The contact plus its full event timeline, oldest first.
 
-### `crm list [--stage X]`
-All contacts, optionally filtered by stage.
+### `crm list [--stage X] [--limit N] [--offset N]`
+A page of contacts, most-recently-updated first, optionally filtered by stage. Default page
+size is 500. The response includes `total`/`returned`/`offset`/`limit` so you can tell whether
+you're seeing everything or need to page further:
+```sh
+crm list --limit 500 --offset 0     # {"contacts":[...],"total":842,"returned":500,"offset":0,"limit":500}
+crm list --limit 500 --offset 500   # the next page — keep advancing offset by returned until offset+returned >= total
+```
 
 ### `crm due`
 Contacts whose `next_due` is today or earlier.

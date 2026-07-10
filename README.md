@@ -56,7 +56,7 @@ crm log <contact> <channel> <summary> [--ref --direction in|out]   # append a to
 crm stage <contact> <new|contacted|replied|meeting|deal|won|lost>
 crm next <contact> <action> [--due 2026-07-08 | --due "+4 days"]
 crm show <contact>            # contact + full timeline
-crm list [--stage X]
+crm list [--stage X] [--limit N] [--offset N]   # paginated; response includes total/returned/offset/limit
 crm due                       # next steps due today / overdue
 crm pipeline                  # counts by stage
 crm ingest '<json>' | crm ingest -        # bulk upsert from grepapi leads (the sink); - reads stdin for large batches
