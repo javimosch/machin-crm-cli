@@ -7,6 +7,7 @@ Technical, human-facing docs for **crm-cli** — the agent-first CRM. If you're 
 - **[The outbound loop](outbound-loop.md)** — how campaigns actually work: stage → send/call → get replies back automatically.
 - **[Safety rails](safety-rails.md)** — `--dry-run` and `crm undo`, and exactly what is and isn't reversible.
 - **[Entity resolution](entity-resolution.md)** — finding and merging duplicate contacts, including the automated loop.
+- **[Workspaces](workspaces.md)** — running multiple isolated CRMs (one per client, one per micro-SaaS) from a single binary.
 - **[Architecture](architecture.md)** — the schema, the audit trail, and the design decisions behind them, for anyone extending or self-hosting this.
 - **[Changelog](changelog.html)** — what shipped, month by month.
 

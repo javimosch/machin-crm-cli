@@ -5,7 +5,7 @@
 
 // Bumped per release; the released binary reports it via `crm version`, and it's what
 // `crm update` compares against. Keep in lockstep with the git tag.
-func version_str() (v) { v = "0.9.0" }
+func version_str() (v) { v = "0.10.0" }
 
 // esc — JSON-escape a string for hand-built JSON output (stdout is the agent contract).
 func esc(s) (o) {
@@ -75,4 +75,27 @@ func merge_field(p, d) (v) {
 func merge_stage(p_stage, d_stage) (s) {
     s = p_stage
     if p_stage == "new" && d_stage != "new" { s = d_stage }
+}
+
+// slug_ok — true if s is safe to use as a workspace name (and therefore a filesystem path
+// component): lowercase ascii letters, digits, and hyphens only, 1-64 chars, no leading or
+// trailing hyphen. Deliberately strict — reject, don't silently rewrite — because a workspace
+// slug becomes part of a file path (~/.crmd/workspaces/<slug>.db); ambiguity here is a real
+// directory-traversal risk ("--workspace ../../etc/passwd"), not just cosmetic validation.
+func slug_ok(s) (ok) {
+    ok = 0
+    n := len(s)
+    if n < 1 || n > 64 { return ok }
+    if substr(s, 0, 1) == "-" || substr(s, n-1, n) == "-" { return ok }
+    i := 0
+    for i < n {
+        c := substr(s, i, i+1)
+        good := 0
+        if c >= "a" && c <= "z" { good = 1 }
+        if c >= "0" && c <= "9" { good = 1 }
+        if c == "-" { good = 1 }
+        if good == 0 { return ok }
+        i = i + 1
+    }
+    ok = 1
 }

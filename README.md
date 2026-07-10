@@ -27,7 +27,7 @@ Hosted, always-on version: **[crmd.intrane.fr](https://crmd.intrane.fr)**.
 
 **Docs:** [Quickstart](docs/quickstart.md) · [Commands reference](docs/commands.md) ·
 [The outbound loop](docs/outbound-loop.md) · [Safety rails](docs/safety-rails.md) ·
-[Entity resolution](docs/entity-resolution.md) · [Architecture](docs/architecture.md) ·
+[Entity resolution](docs/entity-resolution.md) · [Workspaces](docs/workspaces.md) · [Architecture](docs/architecture.md) ·
 [docs index](docs/README.md) · also live at **[javimosch.github.io/machin-crm-cli](https://javimosch.github.io/machin-crm-cli/)**
 (changelog + nav; the `.md` links above render best on GitHub itself)
 
@@ -69,6 +69,7 @@ crm dedup [--limit N]         # read-only scan for likely-duplicate contacts (me
 crm dedup --auto [--limit N]  # EXECUTES same_email/same_phone merges to convergence; name+company stays review-only
 crm merge <primary> <dupe>    # combine dupe into primary (fields, events, outreach), then delete dupe
 crm undo [--n N]              # revert the last N stage/next/sent/suppress/merge ops, LIFO
+crm workspace list | crm workspace create <slug>   # multiple isolated DBs; pass --workspace <slug> on ANY command
 ```
 `<contact>` resolves by id, exact email, or a name/company substring. DB at `$CRM_DB`
 (default `~/.crm-cli.db`).

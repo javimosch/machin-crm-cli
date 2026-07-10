@@ -25,6 +25,14 @@ suppress(addr, reason, ts)
 
 `stage` is a plain string, not an enum with a rigid lifecycle — `new → contacted → replied → meeting → deal → won/lost` is the convention, not an enforced state machine. Nothing stops you from setting an arbitrary value; `crm pipeline` will just show it as its own bucket.
 
+## Workspaces & multi-tenancy
+
+There is **no account/tenant column anywhere in the schema**, deliberately. Isolation is structural (separate SQLite files), not a `WHERE tenant=?` filter — the latter is a real class of bug (one missed clause is a data leak between customers), the former can't leak by construction.
+
+**Shipped (`--workspace`, local, free):** a thin path-resolution convention, not a schema change. `dbpath()`'s precedence is `$CRM_DB` (explicit override) → `--workspace`/`$CRM_WORKSPACE` (resolves to `~/.crmd/workspaces/<slug>.db`) → the original single-file default. Workspace names are validated by `slug_ok()` (`src/core.src`, unit-tested) — strict allow-list, not a sanitize-and-hope, because the slug becomes a filesystem path component. See `docs/workspaces.md`.
+
+**Sketched, not yet built (the hosted crmd backend's multi-tenant design):** the same "namespace under something the owner reserved, not a flat registry" pattern `hart` already uses for artifact URLs. An `accounts` table with a `UNIQUE account_slug` column is the *only* place a real cross-tenant uniqueness check happens (enforced by the DB itself, checked once, at signup — a rare event). Workspaces nest under an account, so two different customers can each have a workspace called `acme` with zero possibility of collision: storage keys off `<account_id>/<workspace_slug>`, and any public-facing URL (a hosted webhook endpoint) would be `/o/<account-slug>/<workspace-slug>/...`. This turns a frequent, high-stakes uniqueness problem (workspace names, created often) into a rare, cheap one (account slugs, claimed once like a username).
+
 ## The audit trail
 
 A fifth table backs `crm undo`:

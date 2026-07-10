@@ -337,5 +337,37 @@ ok "batched suppress: first suppressed address flagged"  skip_suppressed "$(jq -
 ok "batched suppress: second suppressed address flagged" skip_suppressed "$(jq -r '.preview[]|select(.to=="multib@bat.com").action' <<<"$r")"
 ok "batched suppress: non-suppressed address unaffected"  send            "$(jq -r '.preview[]|select(.to=="multic@bat.com").action' <<<"$r")"
 
+# =====================  WORKSPACES: crm workspace / --workspace  =====================
+# $CRM_DB (exported above, for the WHOLE script) always wins over --workspace per dbpath()'s
+# precedence, so this needs its own isolated subshell: unset CRM_DB, use a fake $HOME so real
+# workspace files never touch the developer's actual ~/.crmd/workspaces/.
+(
+  unset CRM_DB
+  FAKEHOME=$(mktemp -d /tmp/crm-it-home-XXXXXX)
+  export HOME="$FAKEHOME"
+  trap 'rm -rf "$FAKEHOME"' EXIT
+    wsok(){ if [ "$2" = "$3" ]; then echo "WSOK"; else echo "WSFAIL: $1 — got [$3] want [$2]"; fi; }
+
+  r=$("$CRM" workspace list); wsok "workspace list starts empty" '[]' "$(jq -c .workspaces <<<"$r")"
+  r=$("$CRM" workspace create acme); wsok "workspace create reports created:true" true "$(jq -r .created <<<"$r")"
+  r=$("$CRM" workspace create acme); wsok "workspace create is idempotent (created:false 2nd time)" false "$(jq -r .created <<<"$r")"
+  r=$("$CRM" workspace create "../../etc/passwd" 2>&1); wsok "workspace create rejects path traversal" true "$([ "$(jq -r .ok <<<"$r" 2>/dev/null)" = "false" ] && echo true || echo false)"
+
+  "$CRM" add "AcmeLead" --email lead@acme.com --workspace acme >/dev/null
+  "$CRM" add "BetaLead" --email lead@beta.com --workspace beta >/dev/null
+  wsok "acme workspace sees only its own contact" AcmeLead "$("$CRM" list --workspace acme | jq -r '.contacts[0].name')"
+  wsok "beta workspace sees only its own contact" BetaLead "$("$CRM" list --workspace beta | jq -r '.contacts[0].name')"
+  wsok "acme workspace total is 1 (not leaking beta's contact)" 1 "$("$CRM" list --workspace acme | jq -r .total)"
+
+  r=$("$CRM" workspace list); wsok "workspace list now shows both" '["acme","beta"]' "$(jq -c '.workspaces|sort' <<<"$r")"
+
+  echo "$FAKEHOME/.crmd/workspaces/acme.db exists: $([ -f "$FAKEHOME/.crmd/workspaces/acme.db" ] && echo yes || echo no)" | grep -q "yes" && echo "WSOK" || echo "WSFAIL: acme.db file not on disk where expected"
+) > /tmp/ws-subshell-$$.log 2>&1
+WSPASS=$(grep -c '^WSOK$' /tmp/ws-subshell-$$.log)
+WSFAILN=$(grep -c '^WSFAIL' /tmp/ws-subshell-$$.log)
+if [ "$WSFAILN" -gt 0 ]; then grep '^WSFAIL' /tmp/ws-subshell-$$.log; fi
+P=$((P + WSPASS)); F=$((F + WSFAILN))
+rm -f /tmp/ws-subshell-$$.log
+
 echo "== integration: $P passed, $F failed =="
 [ "$F" -eq 0 ]

@@ -126,6 +126,17 @@ Runs a small HTTP server (default port `8790`) with three routes:
 
 Set `RESEND_WEBHOOK_SECRET=whsec_…` to verify the Svix signature (rejects forged requests); without it, requests are accepted unverified (fine for local dev, not for a public endpoint).
 
+## Workspaces — see [Workspaces](workspaces.md) for the full model
+
+### `crm workspace list`
+Every workspace found under `~/.crmd/workspaces/*.db`.
+
+### `crm workspace create <slug>`
+Validates the name (lowercase/digits/hyphens only) and provisions that workspace's DB — idempotent, safe to re-run.
+
+### `--workspace <slug>` (or `$CRM_WORKSPACE`) on any command
+Routes that invocation to `~/.crmd/workspaces/<slug>.db` instead of the default file — full isolation, one file per workspace. Goes *after* the subcommand, like every other flag: `crm add ... --workspace acme`. `$CRM_DB`, if set, always wins over this.
+
 ## Meta
 
 ### `crm version` (alias `-v`, `--version`)

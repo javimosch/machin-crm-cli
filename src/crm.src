@@ -80,13 +80,34 @@ type Outreach struct {
     sent_at int
 }
 
-func dbpath() (p) {
-    p = env("CRM_DB")
-    if p == "" { p = env("HOME") + "/.crm-cli.db" }
+// workspace_dir — where every workspace's DB file lives (~/.crmd/workspaces/<slug>.db).
+// Same directory a hosted crmd hosted backend would provision per-account, per-workspace.
+func workspace_dir() (d) { d = env("HOME") + "/.crmd/workspaces" }
+
+func workspace_path(slug) (p) {
+    if slug_ok(slug) == 0 { die(80, "invalid workspace name \"" + slug + "\" — lowercase letters, digits, hyphens only, no leading/trailing hyphen, 1-64 chars") }
+    d := workspace_dir()
+    system("mkdir -p " + d)   // sqlite_open won't create missing parent dirs itself
+    p = d + "/" + slug + ".db"
 }
 
-func opendb() (db) {
-    db = sqlite_open(dbpath())
+// dbpath — resolve which SQLite file this invocation operates on. Precedence: $CRM_DB (an
+// explicit override always wins) > --workspace/$CRM_WORKSPACE (routes to
+// ~/.crmd/workspaces/<slug>.db, so multiple projects/clients stay in genuinely separate files —
+// see docs/workspaces.md) > the original single-file default.
+func dbpath() (p) {
+    p = env("CRM_DB")
+    if p != "" { return p }
+    ws := flagv(args(), "--workspace", env("CRM_WORKSPACE"))
+    if ws != "" { p = workspace_path(ws); return p }
+    p = env("HOME") + "/.crm-cli.db"
+}
+
+// open_db_at — the schema (tables + pragmas), shared by opendb() (the normal per-invocation
+// path) and cmd_workspace's `create` (which opens a specific workspace file directly, without
+// re-deriving it through dbpath()'s arg-parsing).
+func open_db_at(path) (db) {
+    db = sqlite_open(path)
     sqlite_exec(db, "PRAGMA busy_timeout=3000", []string{})
     sqlite_exec(db, "CREATE TABLE IF NOT EXISTS contacts(id TEXT PRIMARY KEY, name TEXT, company TEXT, email TEXT, phone TEXT, source TEXT, stage TEXT DEFAULT 'new', next_action TEXT DEFAULT '', next_due TEXT DEFAULT '', created INTEGER, updated INTEGER)", []string{})
     sqlite_exec(db, "CREATE TABLE IF NOT EXISTS events(id TEXT PRIMARY KEY, contact_id TEXT, channel TEXT, direction TEXT, summary TEXT, ref TEXT, ts INTEGER)", []string{})
@@ -102,6 +123,8 @@ func opendb() (db) {
     // next/sent/suppress — see cmd_undo.
     sqlite_exec(db, "CREATE TABLE IF NOT EXISTS audit(id TEXT PRIMARY KEY, op_id TEXT, ts INTEGER, cmd TEXT, tbl TEXT, row_id TEXT, action TEXT, before TEXT)", []string{})
 }
+
+func opendb() (db) { db = open_db_at(dbpath()) }
 
 // snap_contact / snap_outreach — a raw one-row JSON array snapshot for the audit trail
 // (read back via jget(before, "[0].<col>") in undo_contact/undo_outreach).
@@ -615,8 +638,59 @@ func cmd_update() {
     say("{\"ok\":true,\"updated\":true,\"hint\":\"run: crm version\"}")
 }
 
+// crm workspace list  -> every workspace found under ~/.crmd/workspaces/*.db
+// crm workspace create <slug>  -> validate the name and provision that workspace's DB (or just
+// confirm it already exists) — doesn't otherwise select it; pass --workspace <slug> (or
+// $CRM_WORKSPACE) on any other command to actually operate against it. See docs/workspaces.md.
+func cmd_workspace(a) {
+    sub := ""
+    if len(a) >= 3 { sub = a[2] }
+
+    if sub == "list" {
+        d := workspace_dir()
+        system("mkdir -p " + d)
+        names := list_dir(d)
+        out := "["
+        first := 1
+        i := 0
+        for i < len(names) {
+            nm := names[i]
+            if has_suffix(nm, ".db") {
+                if first == 0 { out = out + "," }
+                out = out + "\"" + esc(substr(nm, 0, len(nm)-3)) + "\""
+                first = 0
+            }
+            i = i + 1
+        }
+        out = out + "]"
+        say("{\"ok\":true,\"workspaces\":" + out + "}")
+        return
+    }
+
+    if sub == "create" {
+        if len(a) < 4 { die(80, "usage: crm workspace create <slug>") }
+        slug := a[3]
+        p := workspace_path(slug)   // validates the slug (die()s on a bad one) + mkdir -p's the dir
+        existing := list_dir(workspace_dir())
+        existed := 0
+        i := 0
+        for i < len(existing) {
+            if existing[i] == slug + ".db" { existed = 1 }
+            i = i + 1
+        }
+        db := open_db_at(p)
+        sqlite_close(db)
+        created := "true"
+        if existed == 1 { created = "false" }
+        say("{\"ok\":true,\"workspace\":\"" + esc(slug) + "\",\"created\":" + created + ",\"path\":\"" + esc(p) + "\"}")
+        return
+    }
+
+    die(80, "usage: crm workspace list | crm workspace create <slug>")
+}
+
 func cmd_help() {
-    say("{\"ok\":true,\"name\":\"crm-cli\",\"version\":\"" + version_str() + "\",\"tagline\":\"the agent-first CRM — sink for the outreach machine\",\"db\":\"$CRM_DB or ~/.crm-cli.db\",\"commands\":{\"add\":\"add <name> [--company --email --phone --source --stage]\",\"log\":\"log <contact> <channel> <summary> [--ref --direction]\",\"stage\":\"stage <contact> <new|contacted|replied|meeting|deal|won|lost>\",\"next\":\"next <contact> <action> [--due YYYY-MM-DD|+N days]\",\"show\":\"show <contact>\",\"list\":\"list [--stage X] [--limit N] [--offset N] (paginated; response has total/returned/offset/limit so you know if there's more to page through)\",\"due\":\"due (next steps due today/overdue)\",\"pipeline\":\"pipeline (counts by stage)\",\"ingest\":\"ingest '<json>' | ingest - (bulk from grepapi leads; - reads JSON from stdin for large batches, argv has an OS length limit)\",\"queue\":\"queue <contact> <email|phone> [--subject --body] (stage one outreach)\",\"queue-bulk\":\"queue-bulk '<json [{contact,channel,subject,body}]>' | queue-bulk - (load a campaign; - reads JSON from stdin for large batches)\",\"campaign\":\"campaign [--channel email|phone] [--status queued|sent] (the staged campaign as JSON)\",\"followups\":\"followups [--days 3 --max-touches 3 --limit 200] [--queue --subject S --body B] (who is due a bump; --queue stages wave 2, {{name}}/{{company}} substituted)\",\"sent\":\"sent <outreach-id> (mark sent + log touch + advance stage)\",\"send\":\"send [--limit N] [--dry-run] (drip-send queued EMAIL outreach via SMTP; needs SMTP_* env; suppression + footer + stage advance; --dry-run previews with no creds/network/DB writes)\",\"call\":\"call [--limit N] [--dry-run] (drip-dispatch queued PHONE outreach as AI cold-calls via Bland; needs BLAND_API_KEY; outcomes return via serve POST /bland; --dry-run previews with no key/network/DB writes)\",\"suppress\":\"suppress <email|phone> [reason] (never contact again; alias unsub/dnc; undoable)\",\"undo\":\"undo [--n N] (revert the last N stage/next/sent/suppress/merge operations, LIFO; send/call are NOT undoable — an email/call already left)\",\"dedup\":\"dedup [--limit N] (read-only preview of likely-duplicate contacts by same_email/same_phone/same_name_company); dedup --auto [--limit N] (EXECUTES same_email/same_phone merges to convergence — the exact-identity rules only; same_name_company always stays review-only; undoable)\",\"merge\":\"merge <primary> <dupe> (combine dupe into primary — fields, events, outreach — then delete dupe; undoable)\",\"serve\":\"serve [port] (webhook sink: POST /resend email events + POST /bland call outcomes -> the CRM; bounces/complaints auto-suppress)\",\"version\":\"version (the installed release)\",\"update\":\"update (self-update to the latest release)\"}}")
+    say("{\"ok\":true,\"name\":\"crm-cli\",\"version\":\"" + version_str() + "\",\"tagline\":\"the agent-first CRM — sink for the outreach machine\",\"db\":\"$CRM_DB, else --workspace/$CRM_WORKSPACE (~/.crmd/workspaces/<slug>.db), else ~/.crm-cli.db\",\"commands\":{\"workspace\":\"workspace list | workspace create <slug> (multiple isolated DBs — one per project/client; pass --workspace <slug> on any other command to use one)\",\"add\":\"add <name> [--company --email --phone --source --stage]\",\"log\":\"log <contact> <channel> <summary> [--ref --direction]\",\"stage\":\"stage <contact> <new|contacted|replied|meeting|deal|won|lost>\",\"next\":\"next <contact> <action> [--due YYYY-MM-DD|+N days]\",\"show\":\"show <contact>\",\"list\":\"list [--stage X] [--limit N] [--offset N] (paginated; response has total/returned/offset/limit so you know if there's more to page through)\",\"due\":\"due (next steps due today/overdue)\",\"pipeline\":\"pipeline (counts by stage)\",\"ingest\":\"ingest '<json>' | ingest - (bulk from grepapi leads; - reads JSON from stdin for large batches, argv has an OS length limit)\",\"queue\":\"queue <contact> <email|phone> [--subject --body] (stage one outreach)\",\"queue-bulk\":\"queue-bulk '<json [{contact,channel,subject,body}]>' | queue-bulk - (load a campaign; - reads JSON from stdin for large batches)\",\"campaign\":\"campaign [--channel email|phone] [--status queued|sent] (the staged campaign as JSON)\",\"followups\":\"followups [--days 3 --max-touches 3 --limit 200] [--queue --subject S --body B] (who is due a bump; --queue stages wave 2, {{name}}/{{company}} substituted)\",\"sent\":\"sent <outreach-id> (mark sent + log touch + advance stage)\",\"send\":\"send [--limit N] [--dry-run] (drip-send queued EMAIL outreach via SMTP; needs SMTP_* env; suppression + footer + stage advance; --dry-run previews with no creds/network/DB writes)\",\"call\":\"call [--limit N] [--dry-run] (drip-dispatch queued PHONE outreach as AI cold-calls via Bland; needs BLAND_API_KEY; outcomes return via serve POST /bland; --dry-run previews with no key/network/DB writes)\",\"suppress\":\"suppress <email|phone> [reason] (never contact again; alias unsub/dnc; undoable)\",\"undo\":\"undo [--n N] (revert the last N stage/next/sent/suppress/merge operations, LIFO; send/call are NOT undoable — an email/call already left)\",\"dedup\":\"dedup [--limit N] (read-only preview of likely-duplicate contacts by same_email/same_phone/same_name_company); dedup --auto [--limit N] (EXECUTES same_email/same_phone merges to convergence — the exact-identity rules only; same_name_company always stays review-only; undoable)\",\"merge\":\"merge <primary> <dupe> (combine dupe into primary — fields, events, outreach — then delete dupe; undoable)\",\"serve\":\"serve [port] (webhook sink: POST /resend email events + POST /bland call outcomes -> the CRM; bounces/complaints auto-suppress)\",\"version\":\"version (the installed release)\",\"update\":\"update (self-update to the latest release)\"}}")
 }
 
 // crm queue <contact> <channel> [--subject X --body X]  -> stage one outreach message.
@@ -1388,6 +1462,7 @@ func main() {
     if cmd == "" || cmd == "help" { cmd_help(); return }
     if cmd == "version" || cmd == "--version" || cmd == "-v" { cmd_version(); return }
     if cmd == "update" || cmd == "selfupdate" { cmd_update(); return }
+    if cmd == "workspace" { cmd_workspace(a); return }
     if cmd == "serve" { cmd_serve(a); return }
     db := opendb()
     if cmd == "add" { cmd_add(db, a); return }
@@ -1411,6 +1486,8 @@ func main() {
     if cmd == "dedup" { cmd_dedup(db, a); return }
     if cmd == "merge" { cmd_merge(db, a); return }
     sqlite_close(db)
-    write(2, "{\"ok\":false,\"error\":\"unknown command: " + esc(cmd) + "\"}\n")
+    hint := ""
+    if cmd == "--workspace" { hint = " (--workspace goes AFTER the subcommand, like every other flag: crm add ... --workspace acme, not crm --workspace acme add ...)" }
+    write(2, "{\"ok\":false,\"error\":\"unknown command: " + esc(cmd) + esc(hint) + "\"}\n")
     exit(80)
 }

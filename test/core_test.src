@@ -51,11 +51,28 @@ func test_merge_helpers() {
     assert_eq_str(merge_stage("new", "new"), "new", "merge_stage both new")
 }
 
+func test_slug_ok() {
+    assert_eq_int(slug_ok("acme"), 1, "slug_ok plain lowercase")
+    assert_eq_int(slug_ok("acme-beta-2"), 1, "slug_ok with hyphens+digits")
+    assert_eq_int(slug_ok(""), 0, "slug_ok empty rejected")
+    assert_eq_int(slug_ok("Acme"), 0, "slug_ok uppercase rejected")
+    assert_eq_int(slug_ok("acme_beta"), 0, "slug_ok underscore rejected")
+    assert_eq_int(slug_ok("-acme"), 0, "slug_ok leading hyphen rejected")
+    assert_eq_int(slug_ok("acme-"), 0, "slug_ok trailing hyphen rejected")
+    assert_eq_int(slug_ok("../../etc/passwd"), 0, "slug_ok path traversal rejected")
+    assert_eq_int(slug_ok("acme/beta"), 0, "slug_ok slash rejected")
+    assert_eq_int(slug_ok("acme.db"), 0, "slug_ok dot rejected")
+    long65 := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    assert_eq_int(len(long65), 65, "sanity: fixture is 65 chars")
+    assert_eq_int(slug_ok(long65), 0, "slug_ok too-long (65 chars) rejected")
+}
+
 func main() {
     test_e164()
     test_esc()
     test_flags()
     test_version()
     test_merge_helpers()
+    test_slug_ok()
     test_summary()
 }
