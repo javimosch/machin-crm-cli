@@ -42,21 +42,21 @@ type Auditrow struct {
     before string
 }
 
-// Dedupairrow is one candidate pair from `crm dedup`'s SQL-driven rules (same_email,
-// same_name_company): "a" columns aliased so all three rules share one struct shape.
-type Dedupairrow struct {
-    aid string
-    aname string
-    bid string
-    bname string
-    akey string
-}
-
-// Phonerow — id/name/phone for the app-level (e164-normalized) phone-duplicate rule.
-type Phonerow struct {
+// DedupPersonRow — the one row shape dedup_scan fetches, once, to build all three dedup
+// rules' groups (see dedup_scan).
+type DedupPersonRow struct {
     id string
     name string
+    company string
+    email string
     phone string
+}
+
+// Pairrow is one auto-eligible merge candidate found in cmd_dedup_auto.
+type Pairrow struct {
+    pid string
+    did string
+    reason string
 }
 
 // Qitem is one prepared outreach in a bulk campaign load (crm queue-bulk).
@@ -1009,57 +1009,119 @@ func cmd_suppress(db, a) {
 // be undone. Only stage/next/sent/suppress/merge are wired to the trail — `crm send`/`crm call`
 // already left the outside world (an email/call went out) and are NOT undoable; use their
 // --dry-run to preview before running them.
-// crm dedup [--limit N]  -> read-only scan for likely-duplicate contacts, one candidate PAIR
-// per row (primary = earlier-inserted, dupe = later — by rowid, so it's deterministic even
-// when both were created in the same second), grouped by why they match:
+// dedup_scan — ONE linear pass over all contacts building all three dedup rules' groups (id
+// lists keyed by normalized match value) plus id->name/id->company side tables for display.
+// Replaces the old per-rule SQL self-joins (same_email, same_name_company — O(n^2) at the
+// engine level since lower(trim()) defeats any index) and the app-level phone double-loop
+// (same_phone) with a single O(n) scan shared by `crm dedup` and `crm dedup --auto`. Each
+// group's ids are in rowid (insertion) order — group[0] is always the earliest-inserted, the
+// "primary" — by construction, since `all` was fetched ORDER BY rowid and appended in order.
+func dedup_scan(db) (email_groups, phone_groups, namecompany_groups, names, companies) {
+    rows := sqlite_query(db, "SELECT id, name, company, email, phone FROM contacts ORDER BY rowid", []string{})
+    all := parse(rows, []DedupPersonRow{})
+    email_groups = make(map[string][]string)
+    phone_groups = make(map[string][]string)
+    namecompany_groups = make(map[string][]string)
+    names = make(map[string]string)
+    companies = make(map[string]string)
+    i := 0
+    for i < len(all) {
+        c := all[i]
+        names[c.id] = c.name
+        companies[c.id] = c.company
+        e := to_lower(trim(c.email))
+        if e != "" {
+            if has(email_groups, e) { email_groups[e] = append(email_groups[e], c.id) } else { email_groups[e] = []string{c.id} }
+        }
+        if c.phone != "" {
+            pk := e164(c.phone)
+            if has(phone_groups, pk) { phone_groups[pk] = append(phone_groups[pk], c.id) } else { phone_groups[pk] = []string{c.id} }
+        }
+        nm := to_lower(trim(c.name))
+        co := to_lower(trim(c.company))
+        if nm != "" && co != "" {
+            nk := nm + "|||" + co
+            if has(namecompany_groups, nk) { namecompany_groups[nk] = append(namecompany_groups[nk], c.id) } else { namecompany_groups[nk] = []string{c.id} }
+        }
+        i = i + 1
+    }
+}
+
+// dedup_emit — one candidate JSON object for cmd_dedup's output.
+func dedup_emit(primary, dupe, reason, key, names) (obj) {
+    obj = "{\"primary\":\"" + esc(primary) + "\",\"primary_name\":\"" + esc(names[primary]) + "\",\"dupe\":\"" + esc(dupe) + "\",\"dupe_name\":\"" + esc(names[dupe]) + "\",\"reason\":\"" + reason + "\",\"key\":\"" + esc(key) + "\"}"
+}
+
+// crm dedup [--limit N]  -> read-only scan for likely-duplicate contacts, one candidate PAIR per
+// row: PRIMARY (the group's earliest-inserted contact) paired against each OTHER member (not
+// full pairwise combinations — a group of 3+ now yields primary-vs-B and primary-vs-C, not also
+// the eventually-stale B-vs-C — merging the two reported pairs fully resolves the group in one
+// pass). Grouped by why they match:
 //   same_email          — same address, different case/whitespace only
 //   same_phone          — same number once normalized to E.164 (formatting-only duplicates
 //                          that `add`'s exact-string phone match misses)
 //   same_name_company   — same normalized name AND company (no email/phone overlap needed)
-// A group of 3+ duplicates emits multiple pairs; merge one at a time and re-run — earlier
-// pairs can go stale once their primary/dupe id no longer exists. `--auto` skips the preview
-// and executes the auto-eligible merges instead — see cmd_dedup_auto.
+// --limit caps candidates PER RULE, independently (default 200 each) — a rule with many
+// matches never starves the other two out of being reported at all.
+// `--auto` skips the preview and executes the auto-eligible merges instead — see cmd_dedup_auto.
 func cmd_dedup(db, a) {
     if has_flag(a, "--auto") == 1 { cmd_dedup_auto(db, a); return }
-    limit := flagv(a, "--limit", "200")
+    limit := parse_int(flagv(a, "--limit", "200"))
+    if limit <= 0 { limit = 200 }
+    email_groups, phone_groups, nc_groups, names, companies := dedup_scan(db)
     out := "["
     first := 1
+    // limit applies PER RULE (independent counters), matching the old query-per-rule LIMIT
+    // semantics — a rule with lots of matches (e.g. same_email) must never starve the others
+    // out of a shared budget (a real bug caught by the load test: with exactly 200 same_email
+    // pairs and the default limit=200, a shared counter reported same_email only, dropping
+    // same_phone/same_name_company entirely even though both had real matches).
+    count_e := 0
+    count_p := 0
+    count_n := 0
 
-    r1 := sqlite_query(db, "SELECT a.id AS aid, a.name AS aname, b.id AS bid, b.name AS bname, a.email AS akey FROM contacts a JOIN contacts b ON lower(trim(a.email))=lower(trim(b.email)) AND a.rowid<b.rowid AND trim(a.email)<>'' ORDER BY a.rowid LIMIT " + limit, []string{})
-    pairs1 := parse(r1, []Dedupairrow{})
+    ek := keys(email_groups)
     i := 0
-    for i < len(pairs1) {
-        p := pairs1[i]
-        if first == 0 { out = out + "," }
-        out = out + "{\"primary\":\"" + esc(p.aid) + "\",\"primary_name\":\"" + esc(p.aname) + "\",\"dupe\":\"" + esc(p.bid) + "\",\"dupe_name\":\"" + esc(p.bname) + "\",\"reason\":\"same_email\",\"key\":\"" + esc(to_lower(p.akey)) + "\"}"
-        first = 0
-        i = i + 1
-    }
-
-    prows := sqlite_query(db, "SELECT id, name, phone FROM contacts WHERE phone<>'' ORDER BY rowid", []string{})
-    ph := parse(prows, []Phonerow{})
-    i = 0
-    for i < len(ph) {
-        j := i + 1
-        for j < len(ph) {
-            if e164(ph[i].phone) == e164(ph[j].phone) {
-                if first == 0 { out = out + "," }
-                out = out + "{\"primary\":\"" + esc(ph[i].id) + "\",\"primary_name\":\"" + esc(ph[i].name) + "\",\"dupe\":\"" + esc(ph[j].id) + "\",\"dupe_name\":\"" + esc(ph[j].name) + "\",\"reason\":\"same_phone\",\"key\":\"" + esc(e164(ph[i].phone)) + "\"}"
-                first = 0
-            }
+    for i < len(ek) {
+        ids := email_groups[ek[i]]
+        j := 1
+        for j < len(ids) && count_e < limit {
+            if first == 0 { out = out + "," }
+            out = out + dedup_emit(ids[0], ids[j], "same_email", ek[i], names)
+            first = 0
+            count_e = count_e + 1
             j = j + 1
         }
         i = i + 1
     }
 
-    r3 := sqlite_query(db, "SELECT a.id AS aid, a.name AS aname, b.id AS bid, b.name AS bname, a.company AS akey FROM contacts a JOIN contacts b ON lower(trim(a.name))=lower(trim(b.name)) AND lower(trim(a.company))=lower(trim(b.company)) AND trim(a.name)<>'' AND trim(a.company)<>'' AND a.rowid<b.rowid ORDER BY a.rowid LIMIT " + limit, []string{})
-    pairs3 := parse(r3, []Dedupairrow{})
+    pk := keys(phone_groups)
     i = 0
-    for i < len(pairs3) {
-        p := pairs3[i]
-        if first == 0 { out = out + "," }
-        out = out + "{\"primary\":\"" + esc(p.aid) + "\",\"primary_name\":\"" + esc(p.aname) + "\",\"dupe\":\"" + esc(p.bid) + "\",\"dupe_name\":\"" + esc(p.bname) + "\",\"reason\":\"same_name_company\",\"key\":\"" + esc(to_lower(p.akey)) + "\"}"
-        first = 0
+    for i < len(pk) {
+        ids := phone_groups[pk[i]]
+        j := 1
+        for j < len(ids) && count_p < limit {
+            if first == 0 { out = out + "," }
+            out = out + dedup_emit(ids[0], ids[j], "same_phone", pk[i], names)
+            first = 0
+            count_p = count_p + 1
+            j = j + 1
+        }
+        i = i + 1
+    }
+
+    nck := keys(nc_groups)
+    i = 0
+    for i < len(nck) {
+        ids := nc_groups[nck[i]]
+        j := 1
+        for j < len(ids) && count_n < limit {
+            if first == 0 { out = out + "," }
+            out = out + dedup_emit(ids[0], ids[j], "same_name_company", to_lower(companies[ids[0]]), names)
+            first = 0
+            count_n = count_n + 1
+            j = j + 1
+        }
         i = i + 1
     }
 
@@ -1068,70 +1130,88 @@ func cmd_dedup(db, a) {
     say("{\"ok\":true,\"candidates\":" + out + "}")
 }
 
-// dedup_next_high_confidence — the one pair `crm dedup --auto` should merge next, or "" if
-// none remain. Only the two exact-identity rules qualify for auto-merge: same_email and
-// same_phone. same_name_company never auto-merges — two distinct real businesses (e.g.
-// franchise locations) can legitimately share a name+company, so that rule stays report-only,
-// surfaced for an agent/human to judge via `crm dedup`. Re-queries fresh each call (rather than
-// working off a stale batch) so it's correct after each merge changes the id space.
-func dedup_next_high_confidence(db) (pid, did, reason) {
-    pid = ""
-    did = ""
-    reason = ""
-    r1 := sqlite_query(db, "SELECT a.id AS aid, b.id AS bid FROM contacts a JOIN contacts b ON lower(trim(a.email))=lower(trim(b.email)) AND a.rowid<b.rowid AND trim(a.email)<>'' ORDER BY a.rowid LIMIT 1", []string{})
-    p1 := parse(r1, []Dedupairrow{})
-    if len(p1) > 0 { pid = p1[0].aid; did = p1[0].bid; reason = "same_email"; return pid, did, reason }
-
-    prows := sqlite_query(db, "SELECT id, name, phone FROM contacts WHERE phone<>'' ORDER BY rowid", []string{})
-    ph := parse(prows, []Phonerow{})
-    i := 0
-    for i < len(ph) {
-        j := i + 1
-        for j < len(ph) {
-            if e164(ph[i].phone) == e164(ph[j].phone) { pid = ph[i].id; did = ph[j].id; reason = "same_phone"; return pid, did, reason }
-            j = j + 1
-        }
-        i = i + 1
-    }
+// contact_exists — a cheap point lookup by primary key (not a table scan), used to skip a
+// cmd_dedup_auto candidate whose contact was already merged away earlier THIS run.
+func contact_exists(db, id) (ok) {
+    r := sqlite_query(db, "SELECT 1 AS x FROM contacts WHERE id=? LIMIT 1", []string{id})
+    ok = 0
+    if r != "[]" { ok = 1 }
 }
 
 // crm dedup --auto [--limit N]  -> executes the auto-eligible merges (same_email, same_phone —
-// exact-identity rules only) in a loop to convergence, capped at --limit iterations (default
-// 200, hard ceiling 500 regardless of --limit — a runaway-loop backstop, not a real constraint
-// at this tool's scale). Reports what it merged, plus a same_name_company review list (never
-// auto-merged) for an agent/human to act on with `crm merge` one pair at a time. Each auto-merge
-// is a normal, fully undoable op (audit.cmd="dedup-auto") — `crm undo --n N` reverses the last N.
+// exact-identity rules only), capped at --limit merges (default 200, hard ceiling 500 regardless
+// of --limit — a runaway-loop backstop, not a real constraint at this tool's scale). Reports
+// what it merged, plus a same_name_company review list (never auto-merged) for an agent/human to
+// act on with `crm merge` one pair at a time. Each auto-merge is a normal, fully undoable op
+// (audit.cmd="dedup-auto") — `crm undo --n N` reverses the last N.
+//
+// PERFORMANCE: candidates come from ONE dedup_scan call, not re-scanned per merge. The original
+// implementation called a "give me one pair" query fresh on every single iteration — correct,
+// but O(merges × table_size) at best and O(merges × phone_count^2) for the same_phone rule,
+// since that rule's own inner comparison was already O(n^2) per call. At 10k contacts (~400 real
+// duplicates) that meant `--auto` never finished in under 10 minutes. dedup_scan's O(n) bucket
+// pass (fixed for cmd_dedup too — see above) plus a cheap existence check per candidate (not a
+// re-scan) brings the whole operation down to O(n + merges): one scan, not `merges` scans.
+//
+// Correctness on 3+-way duplicate chains (A/B/C all sharing one email, say) despite computing
+// candidates ONCE up front: merge_field always keeps the primary's OWN value when it's
+// non-empty, and every pair in a chain was matched because BOTH sides already had that same
+// value — so merging (A,B) can never change A's email/phone away from what made (A,C) a valid
+// pair too. The only thing that can go stale is a pair whose contact got DELETED by an earlier
+// merge in this same run (it was a `dupe` already), which the existence check catches cheaply.
 func cmd_dedup_auto(db, a) {
     cap := parse_int(flagv(a, "--limit", "200"))
     if cap <= 0 || cap > 500 { cap = 500 }
+    email_groups, phone_groups, nc_groups, names, companies := dedup_scan(db)
+
+    candidates := []Pairrow{}
+    ek := keys(email_groups)
+    i := 0
+    for i < len(ek) {
+        ids := email_groups[ek[i]]
+        j := 1
+        for j < len(ids) { candidates = append(candidates, Pairrow{pid: ids[0], did: ids[j], reason: "same_email"}); j = j + 1 }
+        i = i + 1
+    }
+    pk := keys(phone_groups)
+    i = 0
+    for i < len(pk) {
+        ids := phone_groups[pk[i]]
+        j := 1
+        for j < len(ids) { candidates = append(candidates, Pairrow{pid: ids[0], did: ids[j], reason: "same_phone"}); j = j + 1 }
+        i = i + 1
+    }
+
     merged := 0
     details := "["
     first := 1
-    iter := 0
-    for iter < cap {
-        pid, did, reason := dedup_next_high_confidence(db)
-        if pid == "" { break }
-        dname := merge_contacts(db, pid, did, "dedup-auto")
-        if dname == "" { break }   // shouldn't happen (ids just came from a live query), but don't loop forever on it
+    i = 0
+    for i < len(candidates) && merged < cap {
+        c := candidates[i]
+        i = i + 1
+        if contact_exists(db, c.pid) == 0 || contact_exists(db, c.did) == 0 { continue }   // already merged away this run
+        dname := merge_contacts(db, c.pid, c.did, "dedup-auto")
+        if dname == "" { continue }
         if first == 0 { details = details + "," }
-        details = details + "{\"primary\":\"" + esc(pid) + "\",\"merged\":\"" + esc(did) + "\",\"merged_name\":\"" + esc(dname) + "\",\"reason\":\"" + reason + "\"}"
+        details = details + "{\"primary\":\"" + esc(c.pid) + "\",\"merged\":\"" + esc(c.did) + "\",\"merged_name\":\"" + esc(dname) + "\",\"reason\":\"" + c.reason + "\"}"
         first = 0
         merged = merged + 1
-        iter = iter + 1
     }
     details = details + "]"
 
-    limit := flagv(a, "--limit", "200")
-    r3 := sqlite_query(db, "SELECT a.id AS aid, a.name AS aname, b.id AS bid, b.name AS bname, a.company AS akey FROM contacts a JOIN contacts b ON lower(trim(a.name))=lower(trim(b.name)) AND lower(trim(a.company))=lower(trim(b.company)) AND trim(a.name)<>'' AND trim(a.company)<>'' AND a.rowid<b.rowid ORDER BY a.rowid LIMIT " + limit, []string{})
-    pairs3 := parse(r3, []Dedupairrow{})
     review := "["
     firstR := 1
-    i := 0
-    for i < len(pairs3) {
-        p := pairs3[i]
-        if firstR == 0 { review = review + "," }
-        review = review + "{\"primary\":\"" + esc(p.aid) + "\",\"primary_name\":\"" + esc(p.aname) + "\",\"dupe\":\"" + esc(p.bid) + "\",\"dupe_name\":\"" + esc(p.bname) + "\",\"reason\":\"same_name_company\",\"key\":\"" + esc(to_lower(p.akey)) + "\"}"
-        firstR = 0
+    nck := keys(nc_groups)
+    i = 0
+    for i < len(nck) {
+        ids := nc_groups[nck[i]]
+        j := 1
+        for j < len(ids) {
+            if firstR == 0 { review = review + "," }
+            review = review + dedup_emit(ids[0], ids[j], "same_name_company", to_lower(companies[ids[0]]), names)
+            firstR = 0
+            j = j + 1
+        }
         i = i + 1
     }
     review = review + "]"

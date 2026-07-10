@@ -194,6 +194,23 @@ $CRM add Distinct1 --email d1@z.com >/dev/null
 $CRM add Distinct2 --email d2@z.com >/dev/null
 ok "dedup ignores distinct contacts" "" "$($CRM dedup | jq -r '.candidates[]|select(.primary_name=="Distinct1" or .dupe_name=="Distinct1")')"
 
+# --- REGRESSION: --limit applies PER RULE, not as one shared budget across all
+# three (a real bug caught by the load test: a rule with lots of matches — e.g.
+# same_email — silently starved same_phone/same_name_company out of the report
+# entirely once a single shared counter hit the limit first). Give same_email
+# more pairs than a tiny --limit, and confirm same_phone still gets reported.
+for i in 1 2 3; do
+  $CRM add "LimE${i}a" --email "lim${i}@starve.com" >/dev/null
+  $CRM add "LimE${i}b" --email "LIM${i}@STARVE.COM" >/dev/null
+done
+$CRM add LimP1a --phone "0688990011" >/dev/null
+$CRM add LimP1b --phone "+33 6 88 99 00 11" >/dev/null
+r=$($CRM dedup --limit 2)
+ok "starvation: capped same_email at the limit" 2 "$(jq -r '[.candidates[]|select(.reason=="same_email")]|length' <<<"$r")"
+# (leftover same_phone pairs may exist from earlier read-only `dedup` sections in this
+# shared-state script — assert OUR specific pair is present, not an exact global count)
+ok "starvation: same_phone still reported (not starved)" same_phone "$(jq -r '.candidates[]|select(.dupe_name=="LimP1b").reason' <<<"$r")"
+
 # --- dedup primary/dupe ordering is deterministic (earlier-inserted wins) ---
 r=$($CRM dedup | jq -r '.candidates[]|select(.reason=="same_email" and .key=="dup@case.com")')
 ok "dedup primary is the earlier-inserted (DupA1)" DupA1 "$(jq -r .primary_name <<<"$r")"
