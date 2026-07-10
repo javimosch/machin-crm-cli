@@ -602,7 +602,13 @@ func h_sink(req) (res) {
     if dir == "" { dir = "out" }
     source := jget(body, ".source")
     if source == "" { source = "grepapi" }
+    // optional workspace routing: /sink runs inside a long-lived `serve` process with a FIXED
+    // $CRM_DB from its env, so the --workspace CLI flag (a per-invocation thing) can't apply
+    // here — an explicit "workspace" field in the POST body is the per-request equivalent,
+    // letting one running instance serve multiple isolated campaigns without a second daemon.
+    ws := jget(body, ".workspace")
     db := opendb()
+    if ws != "" { db = open_db_at(workspace_path(ws)) }
     cid := sink_upsert(db, name, email, phone, source)
     sqlite_exec(db, "INSERT INTO events(id,contact_id,channel,direction,summary,ref,ts) VALUES(?,?,?,?,?,?,?)", []string{nid(), cid, channel, dir, summary, ref, str(now())})
     sqlite_exec(db, "UPDATE contacts SET stage='contacted' WHERE id=? AND stage='new'", []string{cid})

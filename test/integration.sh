@@ -369,5 +369,46 @@ if [ "$WSFAILN" -gt 0 ]; then grep '^WSFAIL' /tmp/ws-subshell-$$.log; fi
 P=$((P + WSPASS)); F=$((F + WSFAILN))
 rm -f /tmp/ws-subshell-$$.log
 
+# =====================  SINK WORKSPACE ROUTING: POST /sink {"workspace":...}  =====================
+# `crm serve` runs as one long-lived process with a FIXED $CRM_DB from its env -- the
+# --workspace CLI flag is a per-invocation thing and can't apply to a running server. A
+# "workspace" field in the /sink POST body is the per-request equivalent, letting one running
+# instance serve multiple isolated campaigns (e.g. grepapi outreach for different lead lists)
+# without a second daemon. Own isolated subshell/fake $HOME for the same reason as workspaces above.
+(
+  unset CRM_DB
+  FAKEHOME=$(mktemp -d /tmp/crm-it-sink-XXXXXX)
+  export HOME="$FAKEHOME"
+  export CRM_INGEST_TOKEN="it-sink-token"
+  trap 'kill $SRV_PID 2>/dev/null; rm -rf "$FAKEHOME"' EXIT
+  skok(){ if [ "$2" = "$3" ]; then echo "SKOK"; else echo "SKFAIL: $1 — got [$3] want [$2]"; fi; }
+
+  "$CRM" serve 8796 >/dev/null 2>&1 &
+  SRV_PID=$!
+  sleep 1
+
+  r=$(curl -s -X POST http://localhost:8796/sink -H "Authorization: Bearer it-sink-token" -H "Content-Type: application/json" \
+    -d '{"name":"Default Sink Lead","email":"defaultsink@test.com","channel":"email","summary":"s"}')
+  skok "sink without workspace succeeds" true "$(jq -r .ok <<<"$r")"
+
+  r=$(curl -s -X POST http://localhost:8796/sink -H "Authorization: Bearer it-sink-token" -H "Content-Type: application/json" \
+    -d '{"name":"GTM Sink Lead","email":"gtmsink@test.com","channel":"email","summary":"s","workspace":"sinktest"}')
+  skok "sink with workspace succeeds" true "$(jq -r .ok <<<"$r")"
+
+  skok "default sink lead landed in the default db" DefaultSinkLead \
+    "$(sqlite3 "$FAKEHOME/.crm-cli.db" "SELECT REPLACE(name,' ','') FROM contacts WHERE email='defaultsink@test.com';")"
+  skok "workspace sink lead landed in its own workspace db, not the default" GTMSinkLead \
+    "$(sqlite3 "$FAKEHOME/.crmd/workspaces/sinktest.db" "SELECT REPLACE(name,' ','') FROM contacts WHERE email='gtmsink@test.com';")"
+  skok "workspace sink lead did NOT leak into the default db" "" \
+    "$(sqlite3 "$FAKEHOME/.crm-cli.db" "SELECT name FROM contacts WHERE email='gtmsink@test.com';")"
+
+  kill $SRV_PID 2>/dev/null
+) > /tmp/sink-subshell-$$.log 2>&1
+SKPASS=$(grep -c '^SKOK$' /tmp/sink-subshell-$$.log)
+SKFAILN=$(grep -c '^SKFAIL' /tmp/sink-subshell-$$.log)
+if [ "$SKFAILN" -gt 0 ]; then grep '^SKFAIL' /tmp/sink-subshell-$$.log; fi
+P=$((P + SKPASS)); F=$((F + SKFAILN))
+rm -f /tmp/sink-subshell-$$.log
+
 echo "== integration: $P passed, $F failed =="
 [ "$F" -eq 0 ]
