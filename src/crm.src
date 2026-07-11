@@ -435,12 +435,25 @@ func verify_svix(req, secret) (ok) {
 }
 
 // upsert a minimal contact by email, return its id
-func wh_contact(db, email, name) (id) {
+// wh_find — locate an EXISTING contact by email; never creates one. Used by the engagement
+// events (opened/bounced/complained), which must only ever act on people already in the CRM
+// (cold-campaign recipients are pre-created by crm_sink before the send, so they always exist
+// when their engagement webhook arrives). This is what keeps FOREIGN/transactional mail flowing
+// through the SAME Resend account — e.g. crmd's own welcome/notify emails — from spawning
+// phantom "source=resend" contacts in this CRM. An event for an unknown address is a no-op.
+func wh_find(db, email) (id) {
     id = ""
     if email == "" { return id }
     rows := sqlite_query(db, "SELECT id, name, company, email, phone, source, stage, next_action, next_due, created, updated FROM contacts WHERE email=? LIMIT 1", []string{email})
     cs := parse(rows, []Contact{})
-    if len(cs) > 0 { id = cs[0].id; return id }
+    if len(cs) > 0 { id = cs[0].id }
+}
+
+// wh_contact — find-OR-create by email. Reserved for genuine INBOUND replies, where capturing
+// a contact for an address we don't yet track is a strong, wanted signal (someone replied).
+func wh_contact(db, email, name) (id) {
+    id = wh_find(db, email)
+    if id != "" { return id }
     id = nid()
     n := now()
     sqlite_exec(db, "INSERT INTO contacts(id,name,email,source,stage,created,updated) VALUES(?,?,?,?,?,?,?)", []string{id, name, email, "resend", "contacted", str(n), str(n)})
@@ -502,19 +515,17 @@ func h_resend(req) (res) {
     handled := "ignored:" + etype
     done := 0
     if etype == "email.bounced" {
-        cid := wh_contact(db, to, to)
-        if cid != "" { wh_event(db, cid, "bounced — address invalid", ref); wh_stage(db, cid, "lost") }
-        wh_suppress(db, to, "bounced")
+        cid := wh_find(db, to)
+        if cid != "" { wh_event(db, cid, "bounced — address invalid", ref); wh_stage(db, cid, "lost"); wh_suppress(db, to, "bounced") }
         handled = "bounced"; done = 1
     }
     if done == 0 && etype == "email.complained" {
-        cid := wh_contact(db, to, to)
-        if cid != "" { wh_event(db, cid, "spam complaint — suppress", ref); wh_stage(db, cid, "lost") }
-        wh_suppress(db, to, "complained")
+        cid := wh_find(db, to)
+        if cid != "" { wh_event(db, cid, "spam complaint — suppress", ref); wh_stage(db, cid, "lost"); wh_suppress(db, to, "complained") }
         handled = "complained"; done = 1
     }
     if done == 0 && etype == "email.opened" {
-        cid := wh_contact(db, to, to)
+        cid := wh_find(db, to)
         if cid != "" { wh_event(db, cid, "opened the email", ref) }
         handled = "opened"; done = 1
     }

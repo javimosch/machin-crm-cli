@@ -422,5 +422,53 @@ if [ "$SKFAILN" -gt 0 ]; then grep '^SKFAIL' /tmp/sink-subshell-$$.log; fi
 P=$((P + SKPASS)); F=$((F + SKFAILN))
 rm -f /tmp/sink-subshell-$$.log
 
+# =====================  /resend FIND-ONLY: no phantom contacts from foreign mail  =====================
+# Engagement events (opened/bounced/complained) must only ever touch contacts ALREADY in the
+# CRM — cold-campaign recipients are pre-created by crm_sink before the send, so they always
+# exist when their webhook fires. This is what stops FOREIGN/transactional mail on the same
+# Resend account (e.g. crmd's own welcome/notify emails) from spawning phantom source=resend
+# contacts here. Inbound REPLIES still create (a genuine reply from a new address is wanted).
+(
+  unset CRM_DB
+  FAKEHOME=$(mktemp -d /tmp/crm-it-resend-XXXXXX)
+  export HOME="$FAKEHOME"
+  export CRM_DB="$FAKEHOME/rs.db"
+  trap 'kill $SRV_PID 2>/dev/null; rm -rf "$FAKEHOME"' EXIT
+  rsok(){ if [ "$2" = "$3" ]; then echo "RSOK"; else echo "RSFAIL: $1 — got [$3] want [$2]"; fi; }
+
+  "$CRM" add "Known Lead" --email known@campaign.com --stage contacted >/dev/null
+  "$CRM" serve 8802 >/dev/null 2>&1 &
+  SRV_PID=$!
+  sleep 1
+
+  curl -s -m 8 -X POST http://localhost:8802/resend -H 'content-type: application/json' \
+    -d '{"type":"email.bounced","data":{"email_id":"e1","to":["foreign-bounce@example.com"]}}' >/dev/null
+  curl -s -m 8 -X POST http://localhost:8802/resend -H 'content-type: application/json' \
+    -d '{"type":"email.opened","data":{"email_id":"e2","to":["foreign-open@example.com"]}}' >/dev/null
+  curl -s -m 8 -X POST http://localhost:8802/resend -H 'content-type: application/json' \
+    -d '{"type":"email.opened","data":{"email_id":"e3","to":["known@campaign.com"]}}' >/dev/null
+  curl -s -m 8 -X POST http://localhost:8802/resend -H 'content-type: application/json' \
+    -d '{"type":"email.received","data":{"email_id":"e4","from":"realprospect@theircompany.com","subject":"re"}}' >/dev/null
+  sleep 1
+
+  rsok "foreign bounce did NOT create a phantom contact" "" \
+    "$(sqlite3 "$CRM_DB" "SELECT name FROM contacts WHERE email='foreign-bounce@example.com';")"
+  rsok "foreign open did NOT create a phantom contact" "" \
+    "$(sqlite3 "$CRM_DB" "SELECT name FROM contacts WHERE email='foreign-open@example.com';")"
+  rsok "foreign bounce did NOT pollute the suppress list" "" \
+    "$(sqlite3 "$CRM_DB" "SELECT addr FROM suppress WHERE addr='foreign-bounce@example.com';")"
+  rsok "known contact's open WAS logged" "opened the email" \
+    "$(sqlite3 "$CRM_DB" "SELECT summary FROM events WHERE contact_id=(SELECT id FROM contacts WHERE email='known@campaign.com') AND summary LIKE 'opened%';")"
+  rsok "genuine inbound reply from a new address DID create a contact" realprospect@theircompany.com \
+    "$(sqlite3 "$CRM_DB" "SELECT email FROM contacts WHERE email='realprospect@theircompany.com';")"
+
+  kill $SRV_PID 2>/dev/null
+) > /tmp/rs-subshell-$$.log 2>&1
+RSPASS=$(grep -c '^RSOK$' /tmp/rs-subshell-$$.log)
+RSFAILN=$(grep -c '^RSFAIL' /tmp/rs-subshell-$$.log)
+if [ "$RSFAILN" -gt 0 ]; then grep '^RSFAIL' /tmp/rs-subshell-$$.log; fi
+P=$((P + RSPASS)); F=$((F + RSFAILN))
+rm -f /tmp/rs-subshell-$$.log
+
 echo "== integration: $P passed, $F failed =="
 [ "$F" -eq 0 ]
