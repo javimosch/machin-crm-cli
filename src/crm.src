@@ -84,11 +84,21 @@ type Outreach struct {
 // Same directory a hosted crmd hosted backend would provision per-account, per-workspace.
 func workspace_dir() (d) { d = env("HOME") + "/.crmd/workspaces" }
 
+// ensure_workspace_dir — create ~/.crmd then ~/.crmd/workspaces with the NATIVE mkdir builtin
+// (single-level, so two calls; idempotent — a -1 "already exists" is fine, we only need the dir
+// present afterward). Replaces an earlier system("mkdir -p ...") which forks a subprocess:
+// safe on the CLI main thread, but a fork inside a `crm serve` handler goroutine can DEADLOCK —
+// a POST /sink carrying a "workspace" field hung on exactly this. Native mkdir does no fork.
+func ensure_workspace_dir() {
+    home := env("HOME")
+    mkdir(home + "/.crmd")
+    mkdir(home + "/.crmd/workspaces")
+}
+
 func workspace_path(slug) (p) {
     if slug_ok(slug) == 0 { die(80, "invalid workspace name \"" + slug + "\" — lowercase letters, digits, hyphens only, no leading/trailing hyphen, 1-64 chars") }
-    d := workspace_dir()
-    system("mkdir -p " + d)   // sqlite_open won't create missing parent dirs itself
-    p = d + "/" + slug + ".db"
+    ensure_workspace_dir()   // sqlite_open won't create missing parent dirs itself
+    p = workspace_dir() + "/" + slug + ".db"
 }
 
 // dbpath — resolve which SQLite file this invocation operates on. Precedence: $CRM_DB (an
@@ -606,9 +616,17 @@ func h_sink(req) (res) {
     // $CRM_DB from its env, so the --workspace CLI flag (a per-invocation thing) can't apply
     // here — an explicit "workspace" field in the POST body is the per-request equivalent,
     // letting one running instance serve multiple isolated campaigns without a second daemon.
+    // NB: resolve the workspace WITHOUT workspace_path() — that helper die()s (== exit(), which
+    // would kill the whole daemon) on a bad slug. In a handler we validate and return 400
+    // instead. It also mkdirs via native mkdir (ensure_workspace_dir), never system()/fork.
     ws := jget(body, ".workspace")
+    if ws != "" && slug_ok(ws) == 0 { return response("400 Bad Request", "application/json", "{\"ok\":false,\"error\":\"invalid workspace name\"}") }
     db := opendb()
-    if ws != "" { db = open_db_at(workspace_path(ws)) }
+    if ws != "" {
+        sqlite_close(db)   // opendb() opened the default; route to the workspace file instead
+        ensure_workspace_dir()
+        db = open_db_at(workspace_dir() + "/" + ws + ".db")
+    }
     cid := sink_upsert(db, name, email, phone, source)
     sqlite_exec(db, "INSERT INTO events(id,contact_id,channel,direction,summary,ref,ts) VALUES(?,?,?,?,?,?,?)", []string{nid(), cid, channel, dir, summary, ref, str(now())})
     sqlite_exec(db, "UPDATE contacts SET stage='contacted' WHERE id=? AND stage='new'", []string{cid})
@@ -654,7 +672,7 @@ func cmd_workspace(a) {
 
     if sub == "list" {
         d := workspace_dir()
-        system("mkdir -p " + d)
+        ensure_workspace_dir()
         names := list_dir(d)
         out := "["
         first := 1

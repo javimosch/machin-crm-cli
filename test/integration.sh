@@ -387,13 +387,23 @@ rm -f /tmp/ws-subshell-$$.log
   SRV_PID=$!
   sleep 1
 
-  r=$(curl -s -X POST http://localhost:8796/sink -H "Authorization: Bearer it-sink-token" -H "Content-Type: application/json" \
+  # -m 8 on every call: the workspace path used to fork mkdir inside the handler goroutine and
+  # could DEADLOCK (nondeterministically) — a timeout makes that fail loudly here instead of
+  # hanging the whole suite. The native-mkdir fix removed the fork; this guards against regressing.
+  r=$(curl -s -m 8 -X POST http://localhost:8796/sink -H "Authorization: Bearer it-sink-token" -H "Content-Type: application/json" \
     -d '{"name":"Default Sink Lead","email":"defaultsink@test.com","channel":"email","summary":"s"}')
   skok "sink without workspace succeeds" true "$(jq -r .ok <<<"$r")"
 
-  r=$(curl -s -X POST http://localhost:8796/sink -H "Authorization: Bearer it-sink-token" -H "Content-Type: application/json" \
+  r=$(curl -s -m 8 -X POST http://localhost:8796/sink -H "Authorization: Bearer it-sink-token" -H "Content-Type: application/json" \
     -d '{"name":"GTM Sink Lead","email":"gtmsink@test.com","channel":"email","summary":"s","workspace":"sinktest"}')
-  skok "sink with workspace succeeds" true "$(jq -r .ok <<<"$r")"
+  skok "sink with workspace succeeds (no goroutine-fork hang)" true "$(jq -r .ok <<<"$r")"
+
+  # an invalid workspace slug must be a 400, NOT a die()/exit() that would take down the daemon
+  r=$(curl -s -m 8 -X POST http://localhost:8796/sink -H "Authorization: Bearer it-sink-token" -H "Content-Type: application/json" \
+    -d '{"name":"Bad","email":"badws@test.com","channel":"email","summary":"s","workspace":"../../etc/passwd"}')
+  skok "sink rejects an invalid workspace slug (400, ok:false)" false "$(jq -r .ok <<<"$r")"
+  # ...and the daemon is still serving afterward (die() would have killed it)
+  skok "daemon survives a bad-workspace request" true "$(curl -s -m 5 http://localhost:8796/_health | jq -r .ok)"
 
   skok "default sink lead landed in the default db" DefaultSinkLead \
     "$(sqlite3 "$FAKEHOME/.crm-cli.db" "SELECT REPLACE(name,' ','') FROM contacts WHERE email='defaultsink@test.com';")"
@@ -401,6 +411,8 @@ rm -f /tmp/ws-subshell-$$.log
     "$(sqlite3 "$FAKEHOME/.crmd/workspaces/sinktest.db" "SELECT REPLACE(name,' ','') FROM contacts WHERE email='gtmsink@test.com';")"
   skok "workspace sink lead did NOT leak into the default db" "" \
     "$(sqlite3 "$FAKEHOME/.crm-cli.db" "SELECT name FROM contacts WHERE email='gtmsink@test.com';")"
+  skok "rejected bad-workspace lead did not land in the default db" "" \
+    "$(sqlite3 "$FAKEHOME/.crm-cli.db" "SELECT name FROM contacts WHERE email='badws@test.com';")"
 
   kill $SRV_PID 2>/dev/null
 ) > /tmp/sink-subshell-$$.log 2>&1
