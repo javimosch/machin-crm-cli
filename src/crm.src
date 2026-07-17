@@ -195,6 +195,39 @@ func nid() (s) { s = to_hex(rand_bytes(8)) }
 
 func say(s) { write(1, s + "\n") }
 
+// post_fb — best-effort feedback POST; 1 on 200. Never blocks.
+func post_fb(url, payload) (ok) {
+    status, resp, err := http_request("POST", url, []string{"content-type: application/json"}, payload)
+    if err == "" { if status == 200 { ok = 1 } }
+}
+
+// crm feedback <message> [--kind bug|idea|praise] [--context <c>] — send feedback about crmd.
+// Dual-writes best-effort: to the crmd control plane (CRMD_URL, default api.crmd.intrane.fr) AND
+// the central relay (machin-feedback; FEEDBACK_RELAY overrides, "off" disables). Idempotent on
+// a shared client id; never fails.
+func cmd_feedback(a) {
+    if len(a) < 3 { die(80, "usage: crm feedback <message> [--kind bug|idea|praise] [--context <what you were doing>]") }
+    msg := a[2]
+    kind := flagv(a, "--kind", "note")
+    ctx := flagv(a, "--context", "")
+    rep := env("USER")
+    if rep == "" { rep = "agent" }
+    id := to_hex(rand_bytes(8))
+    payload := "{\"app\":\"crmd\",\"version\":\"" + version_str() + "\",\"kind\":\"" + esc(kind) + "\",\"message\":\"" + esc(msg) + "\",\"context\":\"" + esc(ctx) + "\",\"reporter\":\"" + esc(rep) + "\",\"id\":\"" + id + "\"}"
+    app := env("CRMD_URL")
+    if app == "" { app = "https://api.crmd.intrane.fr" }
+    stored := post_fb(app + "/v1/feedback", payload)
+    relay := env("FEEDBACK_RELAY")
+    if relay == "" { relay = "https://feedback.intrane.fr" }
+    relayed := 0
+    if relay != "off" { relayed = post_fb(relay + "/v1/feedback", payload) }
+    st := "false"
+    if stored == 1 { st = "true" }
+    rl := "false"
+    if relayed == 1 { rl = "true" }
+    say("{\"ok\":true,\"id\":\"" + id + "\",\"stored\":" + st + ",\"relayed\":" + rl + "}")
+}
+
 // version_str / esc live in src/core.src (pure, unit-tested).
 
 func die(code, msg) {
@@ -1499,6 +1532,7 @@ func main() {
     if cmd == "update" || cmd == "selfupdate" { cmd_update(); return }
     if cmd == "workspace" { cmd_workspace(a); return }
     if cmd == "serve" { cmd_serve(a); return }
+    if cmd == "feedback" { cmd_feedback(a); return }
     db := opendb()
     if cmd == "add" { cmd_add(db, a); return }
     if cmd == "log" { cmd_log(db, a); return }
