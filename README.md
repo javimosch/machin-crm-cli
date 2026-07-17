@@ -11,6 +11,24 @@ Every CRM dies of stale data because humans won't do data entry. This one is wri
 driven by an agent and auto-fed by the outreach tools — so it stays current with ~zero
 manual effort. The wedge isn't "self-maintaining" (table stakes); it's **agent-first**.
 
+## Hosted — crmd
+The CLI is free and open source. Run it locally, own your data, no daemon to babysit.
+
+**Don't want to run a server?** [**crmd**](https://crmd.intrane.fr) is the hosted version —
+a always-on webhook endpoint your outreach tools post to, so engagement events (opens,
+bounces, replies, call outcomes) self-log even when your machine is off.
+
+| | CLI (free, OSS) | crmd (€19/mo, 14-day trial) |
+|---|---|---|
+| Engine | Full — all commands | Same engine, hosted |
+| Webhook sink | Run `crm serve` yourself | Live endpoint at `api.crmd.intrane.fr/o/<your-slug>/` |
+| Resend / Bland | You expose the port, configure TLS | Paste a URL, done |
+| Data | Your SQLite file, your disk | Isolated workspace DB on the server |
+| Read API | CLI only | `GET /list`, `GET /show`, `GET /pipeline` |
+
+**[Start free trial →](https://crmd.intrane.fr)** · signup is automated: a Stripe payment
+provisions your workspace and emails you the live URLs + token in seconds.
+
 ## Install
 ```sh
 curl -fsSL https://raw.githubusercontent.com/javimosch/machin-crm-cli/master/install.sh | sh
@@ -23,7 +41,7 @@ crm update      # self-update to the latest release (honors CRM_BIN_DIR)
 ```
 Prebuilt is `linux-x64` (glibc ≥ 2.35, needs `libssl3` + `libsqlite3`; Ubuntu 22.04+/Debian 12+).
 Older glibc / musl / macOS / arm64 auto-fall-back to source (needs `machin` + a C compiler + git).
-Hosted, always-on version: **[crmd.intrane.fr](https://crmd.intrane.fr)**.
+Hosted, always-on version (no server to run): **[crmd.intrane.fr](https://crmd.intrane.fr)** — see [§ Hosted](#hosted--crmd) above.
 
 **Docs:** [Quickstart](docs/quickstart.md) · [Commands reference](docs/commands.md) ·
 [The outbound loop](docs/outbound-loop.md) · [Safety rails](docs/safety-rails.md) ·
@@ -219,4 +237,10 @@ your outreach `reply-to` pointed at that address — then replies flow through t
 Your lead engine owns **top-of-funnel leads**; crm-cli owns **post-engagement
 relationships**. The handoff is *"they engaged."* Have your calling / email glue shell out to
 `crm add` + `crm log` after each touch — the CRM then self-populates with zero data entry.
-(Built to pair with [machin](https://github.com/javimosch/machin)-based outreach tools.)
+(Built to pair with [machin](https://github.com/javimosch/machin)-based outreach tools like
+[grepapi](https://grepapi.intrane.fr) — point it at an ICP, get ranked leads with briefs your
+agent turns into outreach, then pipe straight into `crm ingest`.)
+
+---
+
+**[Hosted version (crmd) →](https://crmd.intrane.fr)** · **[Docs →](https://javimosch.github.io/machin-crm-cli/)**
