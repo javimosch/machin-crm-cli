@@ -132,6 +132,10 @@ func open_db_at(path) (db) {
     // (an "insert" action has no before — undo just deletes the row). Only wired for stage/
     // next/sent/suppress — see cmd_undo.
     sqlite_exec(db, "CREATE TABLE IF NOT EXISTS audit(id TEXT PRIMARY KEY, op_id TEXT, ts INTEGER, cmd TEXT, tbl TEXT, row_id TEXT, action TEXT, before TEXT)", []string{})
+    // inbound_mail — archive of full Resend-received reply bodies. Resend keeps them 30 days;
+    // this table keeps them in the CRM backend indefinitely (until cleaned by an operator).
+    // Keyed by resend_id so replayed webhooks are idempotent.
+    sqlite_exec(db, "CREATE TABLE IF NOT EXISTS inbound_mail(id TEXT PRIMARY KEY, contact_id TEXT, resend_id TEXT UNIQUE, from_addr TEXT, to_addr TEXT, subject TEXT, body TEXT, ts INTEGER)", []string{})
 }
 
 func opendb() (db) { db = open_db_at(dbpath()) }
@@ -344,6 +348,19 @@ func cmd_show(db, a) {
     say("{\"ok\":true,\"contact\":" + c + ",\"timeline\":" + ev + "}")
 }
 
+// crm inbound <contact>  -> full received emails (inbound_mail archive) for a contact.
+// `body` is stored as the raw JSON string token emitted directly without re-escaping.
+func cmd_inbound(db, a) {
+    if len(a) < 3 { die(80, "usage: crm inbound <contact>") }
+    cid := resolve(db, a[2])
+    if cid == "" { die(90, "no contact matching: " + a[2]) }
+    limit := parse_int(flagv(a, "--limit", "50"))
+    if limit <= 0 || limit > 500 { limit = 500 }
+    rows := sqlite_query(db, "SELECT id, resend_id, from_addr, to_addr, subject, body, ts FROM inbound_mail WHERE contact_id=? ORDER BY ts DESC LIMIT " + str(limit), []string{cid})
+    sqlite_close(db)
+    say("{\"ok\":true,\"contact\":\"" + esc(a[2]) + "\",\"inbound\":" + rows + "}")
+}
+
 // crm list [--stage X] [--limit N] [--offset N]  -> a page of contacts, most-recently-updated
 // first, plus total/returned/offset/limit so a caller can tell whether it's seeing everything
 // or needs to page further (crm list --offset 500 --limit 500, ...). The old version silently
@@ -509,25 +526,33 @@ func wh_suppress(db, addr, reason) {
     sqlite_exec(db, "UPDATE outreach SET status='suppressed' WHERE status='queued' AND contact_id IN (SELECT id FROM contacts WHERE email=?)", []string{a})
 }
 
-// forward_reply — fetch the received email's body and forward a copy to CRM_FORWARD_TO
-// (e.g. a monitored inbox) via Resend. Best-effort; reply-to is set to the lead so a reply
-// from that inbox reaches them directly. Needs RESEND_API_KEY + CRM_FORWARD_TO in env.
-func forward_reply(ref, from_addr, subject) {
+// fetchInboundBody — pull the full text of a received email from Resend.
+// Returns the raw JSON string token (including surrounding quotes) so it can be
+// embedded directly into a JSON payload or stored and re-emitted as-is.
+func fetchInboundBody(ref) (body) {
+    body = "\"(body could not be retrieved)\""
     key := env("RESEND_API_KEY")
-    to := env("CRM_FORWARD_TO")
-    if key == "" || to == "" || ref == "" { return }
-    // pull the full received body (webhook carries metadata only)
+    if key == "" || ref == "" { return body }
     gh := []string{"Authorization: Bearer " + key}
     gstatus, gresp, gerr := http_request("GET", "https://api.resend.com/emails/inbound/" + ref, gh, "")
-    traw := "\"(body could not be retrieved)\""
     if gerr == "" && gstatus == 200 {
         t, terr := json_get(gresp, ".text")
-        if terr == "" && t != "" { traw = t }   // raw JSON string token — embed as-is (already escaped)
+        if terr == "" && t != "" { body = t }
     }
+}
+
+// forward_reply — forward a copy of a received email to CRM_FORWARD_TO
+// (e.g. a monitored inbox) via Resend. Best-effort; reply-to is set to the lead so a reply
+// from that inbox reaches them directly. Needs RESEND_API_KEY + CRM_FORWARD_TO in env.
+// `body` is the raw JSON string token returned by fetchInboundBody.
+func forward_reply(from_addr, subject, body) {
+    key := env("RESEND_API_KEY")
+    to := env("CRM_FORWARD_TO")
+    if key == "" || to == "" { return }
     fromh := env("CRM_FORWARD_FROM")
     if fromh == "" { fromh = "intrane CRM <no-reply@intrane.fr>" }
     subj := "Reply from " + from_addr + " — " + subject
-    payload := "{\"from\":\"" + esc(fromh) + "\",\"to\":[\"" + esc(to) + "\"],\"reply_to\":\"" + esc(from_addr) + "\",\"subject\":\"" + esc(subj) + "\",\"text\":" + traw + "}"
+    payload := "{\"from\":\"" + esc(fromh) + "\",\"to\":[\"" + esc(to) + "\"],\"reply_to\":\"" + esc(from_addr) + "\",\"subject\":\"" + esc(subj) + "\",\"text\":" + body + "}"
     ph := []string{"Authorization: Bearer " + key, "content-type: application/json"}
     _, _, _ = http_request("POST", "https://api.resend.com/emails", ph, payload)
 }
@@ -569,9 +594,19 @@ func h_resend(req) (res) {
             if index(from, "@") < 0 { from = jget(body, ".data.from.address") }   // from may be an object
             if index(from, "@") < 0 { from = jget(body, ".data.from[0]") }
             subj := jget(body, ".data.subject")
+            // capture the destination address the lead actually replied to
+            reply_to := to
+            if reply_to == "" { reply_to = jget(body, ".data.to[0]") }
+            if reply_to == "" { reply_to = jget(body, ".data.to") }
             cid := wh_contact(db, from, from)
-            if cid != "" { wh_event(db, cid, "REPLY — " + subj, ref); wh_stage(db, cid, "replied") }
-            forward_reply(ref, from, subj)   // send a copy to the monitored inbox
+            rbody := fetchInboundBody(ref)
+            if cid != "" {
+                wh_event(db, cid, "REPLY — " + subj, ref)
+                wh_stage(db, cid, "replied")
+                sqlite_exec(db, "INSERT OR IGNORE INTO inbound_mail(id,contact_id,resend_id,from_addr,to_addr,subject,body,ts) VALUES(?,?,?,?,?,?,?,?)",
+                    []string{nid(), cid, ref, from, reply_to, subj, rbody, str(now())})
+            }
+            forward_reply(from, subj, rbody)   // send a copy to the monitored inbox
             handled = "reply"; done = 1
         }
     }
@@ -758,7 +793,7 @@ func cmd_workspace(a) {
 }
 
 func cmd_help() {
-    say("{\"ok\":true,\"name\":\"crm-cli\",\"version\":\"" + version_str() + "\",\"tagline\":\"the agent-first CRM — sink for the outreach machine\",\"db\":\"$CRM_DB, else --workspace/$CRM_WORKSPACE (~/.crmd/workspaces/<slug>.db), else ~/.crm-cli.db\",\"commands\":{\"workspace\":\"workspace list | workspace create <slug> (multiple isolated DBs — one per project/client; pass --workspace <slug> on any other command to use one)\",\"add\":\"add <name> [--company --email --phone --source --stage]\",\"log\":\"log <contact> <channel> <summary> [--ref --direction]\",\"stage\":\"stage <contact> <new|contacted|replied|meeting|deal|won|lost>\",\"next\":\"next <contact> <action> [--due YYYY-MM-DD|+N days]\",\"show\":\"show <contact>\",\"list\":\"list [--stage X] [--limit N] [--offset N] (paginated; response has total/returned/offset/limit so you know if there's more to page through)\",\"due\":\"due (next steps due today/overdue)\",\"pipeline\":\"pipeline (counts by stage)\",\"ingest\":\"ingest '<json>' | ingest - (bulk from grepapi leads; - reads JSON from stdin for large batches, argv has an OS length limit)\",\"queue\":\"queue <contact> <email|phone> [--subject --body] (stage one outreach)\",\"queue-bulk\":\"queue-bulk '<json [{contact,channel,subject,body}]>' | queue-bulk - (load a campaign; - reads JSON from stdin for large batches)\",\"campaign\":\"campaign [--channel email|phone] [--status queued|sent] (the staged campaign as JSON)\",\"followups\":\"followups [--days 3 --max-touches 3 --limit 200] [--queue --subject S --body B] (who is due a bump; --queue stages wave 2, {{name}}/{{company}} substituted)\",\"sent\":\"sent <outreach-id> (mark sent + log touch + advance stage)\",\"send\":\"send [--limit N] [--dry-run] (drip-send queued EMAIL outreach via SMTP; needs SMTP_* env; suppression + footer + stage advance; --dry-run previews with no creds/network/DB writes)\",\"call\":\"call [--limit N] [--dry-run] (drip-dispatch queued PHONE outreach as AI cold-calls via Bland; needs BLAND_API_KEY; outcomes return via serve POST /bland; --dry-run previews with no key/network/DB writes)\",\"suppress\":\"suppress <email|phone> [reason] (never contact again; alias unsub/dnc; undoable)\",\"undo\":\"undo [--n N] (revert the last N stage/next/sent/suppress/merge operations, LIFO; send/call are NOT undoable — an email/call already left)\",\"dedup\":\"dedup [--limit N] (read-only preview of likely-duplicate contacts by same_email/same_phone/same_name_company); dedup --auto [--limit N] (EXECUTES same_email/same_phone merges to convergence — the exact-identity rules only; same_name_company always stays review-only; undoable)\",\"merge\":\"merge <primary> <dupe> (combine dupe into primary — fields, events, outreach — then delete dupe; undoable)\",\"serve\":\"serve [port] (webhook sink: POST /resend email events + POST /bland call outcomes -> the CRM; bounces/complaints auto-suppress)\",\"version\":\"version (the installed release)\",\"update\":\"update (self-update to the latest release)\"}}")
+    say("{\"ok\":true,\"name\":\"crm-cli\",\"version\":\"" + version_str() + "\",\"tagline\":\"the agent-first CRM — sink for the outreach machine\",\"db\":\"$CRM_DB, else --workspace/$CRM_WORKSPACE (~/.crmd/workspaces/<slug>.db), else ~/.crm-cli.db\",\"commands\":{\"workspace\":\"workspace list | workspace create <slug> (multiple isolated DBs — one per project/client; pass --workspace <slug> on any other command to use one)\",\"add\":\"add <name> [--company --email --phone --source --stage]\",\"log\":\"log <contact> <channel> <summary> [--ref --direction]\",\"stage\":\"stage <contact> <new|contacted|replied|meeting|deal|won|lost>\",\"next\":\"next <contact> <action> [--due YYYY-MM-DD|+N days]\",\"show\":\"show <contact>\",\"inbound\":\"inbound <contact> [--limit N] (full archived Resend reply bodies for a contact)\",\"list\":\"list [--stage X] [--limit N] [--offset N] (paginated; response has total/returned/offset/limit so you know if there's more to page through)\",\"due\":\"due (next steps due today/overdue)\",\"pipeline\":\"pipeline (counts by stage)\",\"ingest\":\"ingest '<json>' | ingest - (bulk from grepapi leads; - reads JSON from stdin for large batches, argv has an OS length limit)\",\"queue\":\"queue <contact> <email|phone> [--subject --body] (stage one outreach)\",\"queue-bulk\":\"queue-bulk '<json [{contact,channel,subject,body}]>' | queue-bulk - (load a campaign; - reads JSON from stdin for large batches)\",\"campaign\":\"campaign [--channel email|phone] [--status queued|sent] (the staged campaign as JSON)\",\"followups\":\"followups [--days 3 --max-touches 3 --limit 200] [--queue --subject S --body B] (who is due a bump; --queue stages wave 2, {{name}}/{{company}} substituted)\",\"sent\":\"sent <outreach-id> (mark sent + log touch + advance stage)\",\"send\":\"send [--limit N] [--dry-run] (drip-send queued EMAIL outreach via SMTP; needs SMTP_* env; suppression + footer + stage advance; --dry-run previews with no creds/network/DB writes)\",\"call\":\"call [--limit N] [--dry-run] (drip-dispatch queued PHONE outreach as AI cold-calls via Bland; needs BLAND_API_KEY; outcomes return via serve POST /bland; --dry-run previews with no key/network/DB writes)\",\"suppress\":\"suppress <email|phone> [reason] (never contact again; alias unsub/dnc; undoable)\",\"undo\":\"undo [--n N] (revert the last N stage/next/sent/suppress/merge operations, LIFO; send/call are NOT undoable — an email/call already left)\",\"dedup\":\"dedup [--limit N] (read-only preview of likely-duplicate contacts by same_email/same_phone/same_name_company); dedup --auto [--limit N] (EXECUTES same_email/same_phone merges to convergence — the exact-identity rules only; same_name_company always stays review-only; undoable)\",\"merge\":\"merge <primary> <dupe> (combine dupe into primary — fields, events, outreach — then delete dupe; undoable)\",\"serve\":\"serve [port] (webhook sink: POST /resend email events + POST /bland call outcomes -> the CRM; bounces/complaints auto-suppress)\",\"version\":\"version (the installed release)\",\"update\":\"update (self-update to the latest release)\"}}")
 }
 
 // crm queue <contact> <channel> [--subject X --body X]  -> stage one outreach message.
@@ -1539,6 +1574,7 @@ func main() {
     if cmd == "stage" { cmd_stage(db, a); return }
     if cmd == "next" { cmd_next(db, a); return }
     if cmd == "show" { cmd_show(db, a); return }
+    if cmd == "inbound" { cmd_inbound(db, a); return }
     if cmd == "list" { cmd_list(db, a); return }
     if cmd == "due" { cmd_due(db); return }
     if cmd == "pipeline" { cmd_pipeline(db); return }
