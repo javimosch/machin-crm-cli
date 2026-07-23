@@ -388,6 +388,78 @@ func cmd_list(db, a) {
     say("{\"ok\":true,\"contacts\":" + rows + ",\"total\":" + total + ",\"returned\":" + str(len(returned)) + ",\"offset\":" + str(offset) + ",\"limit\":" + str(limit) + "}")
 }
 
+// crm cleanup [--dry-run] [--days N]  -> purge old audit/events/inbound_mail/outreach.
+// Stage-aware: events/outreach/inbound_mail for contacts in active pipeline stages
+// (contacted/replied/meeting/deal) are NEVER purged regardless of age. suppress
+// and contacts are never purged. Per-table env: CRM_AUDIT_DAYS (30), CRM_EVENT_DAYS
+// (365), CRM_INBOUND_DAYS (730), CRM_OUTREACH_DAYS (365). Global fallback:
+// CRM_RETENTION_DAYS (365) applies to all if the per-table var is unset.
+func cmd_cleanup(db, a) {
+    dry := has_flag(a, "--dry-run")
+    // --days N overrides everything (global knob)
+    override := flagv(a, "--days", "")
+    audit_days := parse_int(orv(override, orv(env("CRM_AUDIT_DAYS"), env("CRM_RETENTION_DAYS"))))
+    if audit_days == 0 { audit_days = 30 }
+    event_days := parse_int(orv(override, orv(env("CRM_EVENT_DAYS"), env("CRM_RETENTION_DAYS"))))
+    if event_days == 0 { event_days = 365 }
+    inbound_days := parse_int(orv(override, orv(env("CRM_INBOUND_DAYS"), env("CRM_RETENTION_DAYS"))))
+    if inbound_days == 0 { inbound_days = 730 }
+    outreach_days := parse_int(orv(override, orv(env("CRM_OUTREACH_DAYS"), env("CRM_RETENTION_DAYS"))))
+    if outreach_days == 0 { outreach_days = 365 }
+
+    now := now()
+    audit_cut := now - audit_days * 86400
+    event_cut := now - event_days * 86400
+    inbound_cut := now - inbound_days * 86400
+    outreach_cut := now - outreach_days * 86400
+
+    // audit: always safe to purge old rows (only the last op is undoable)
+    audit_n := count_where(db, "audit", "ts < " + str(audit_cut))
+    if dry == 0 && audit_n > 0 {
+        sqlite_exec(db, "DELETE FROM audit WHERE ts < " + str(audit_cut), []string{})
+    }
+
+    // events: purge old events EXCEPT those on active-pipeline contacts
+    event_n := count_where(db, "events", "ts < " + str(event_cut) + " AND contact_id NOT IN (SELECT id FROM contacts WHERE stage IN ('contacted','replied','meeting','deal'))")
+    if dry == 0 && event_n > 0 {
+        sqlite_exec(db, "DELETE FROM events WHERE ts < " + str(event_cut) + " AND contact_id NOT IN (SELECT id FROM contacts WHERE stage IN ('contacted','replied','meeting','deal'))", []string{})
+    }
+
+    // inbound_mail: same stage guard
+    inbound_n := count_where(db, "inbound_mail", "ts < " + str(inbound_cut) + " AND contact_id NOT IN (SELECT id FROM contacts WHERE stage IN ('contacted','replied','meeting','deal'))")
+    if dry == 0 && inbound_n > 0 {
+        sqlite_exec(db, "DELETE FROM inbound_mail WHERE ts < " + str(inbound_cut) + " AND contact_id NOT IN (SELECT id FROM contacts WHERE stage IN ('contacted','replied','meeting','deal'))", []string{})
+    }
+
+    // outreach: same stage guard
+    outreach_n := count_where(db, "outreach", "created < " + str(outreach_cut) + " AND contact_id NOT IN (SELECT id FROM contacts WHERE stage IN ('contacted','replied','meeting','deal'))")
+    if dry == 0 && outreach_n > 0 {
+        sqlite_exec(db, "DELETE FROM outreach WHERE created < " + str(outreach_cut) + " AND contact_id NOT IN (SELECT id FROM contacts WHERE stage IN ('contacted','replied','meeting','deal'))", []string{})
+    }
+
+    suppress_n := count_where(db, "suppress", "")
+    contact_n := count_where(db, "contacts", "")
+    sqlite_close(db)
+
+    say("{\"ok\":true,\"dry_run\":" + str(dry) + ",\"retention_days\":{\"audit\":" + str(audit_days) + ",\"events\":" + str(event_days) + ",\"inbound_mail\":" + str(inbound_days) + ",\"outreach\":" + str(outreach_days) + "},\"purged\":{\"audit\":" + str(audit_n) + ",\"events\":" + str(event_n) + ",\"inbound_mail\":" + str(inbound_n) + ",\"outreach\":" + str(outreach_n) + "},\"kept\":{\"suppress\":" + str(suppress_n) + ",\"contacts\":" + str(contact_n) + "}}")
+}
+
+// orv — return s1 if non-empty, else s2 (coalesce for env fallback chains)
+func orv(s1, s2) (r) {
+    r = s2
+    if s1 != "" { r = s1 }
+}
+
+// count_where — COUNT(*) from tbl with an optional WHERE clause (no params).
+func count_where(db, tbl, where) (n) {
+    n = 0
+    q := "SELECT COUNT(*) AS n FROM " + tbl
+    if where != "" { q = q + " WHERE " + where }
+    rows := sqlite_query(db, q, []string{})
+    v, _ := json_get(rows, "[0].n")
+    n = parse_int(v)
+}
+
 // crm due  -> contacts whose next step is due today or overdue (the "what's next" view)
 func cmd_due(db) {
     rows := sqlite_query(db, "SELECT id, name, company, stage, next_action, next_due FROM contacts WHERE next_due != '' AND next_due <= date('now') ORDER BY next_due ASC", []string{})
@@ -793,7 +865,7 @@ func cmd_workspace(a) {
 }
 
 func cmd_help() {
-    say("{\"ok\":true,\"name\":\"crm-cli\",\"version\":\"" + version_str() + "\",\"tagline\":\"the agent-first CRM — sink for the outreach machine\",\"db\":\"$CRM_DB, else --workspace/$CRM_WORKSPACE (~/.crmd/workspaces/<slug>.db), else ~/.crm-cli.db\",\"commands\":{\"workspace\":\"workspace list | workspace create <slug> (multiple isolated DBs — one per project/client; pass --workspace <slug> on any other command to use one)\",\"add\":\"add <name> [--company --email --phone --source --stage]\",\"log\":\"log <contact> <channel> <summary> [--ref --direction]\",\"stage\":\"stage <contact> <new|contacted|replied|meeting|deal|won|lost>\",\"next\":\"next <contact> <action> [--due YYYY-MM-DD|+N days]\",\"show\":\"show <contact>\",\"inbound\":\"inbound <contact> [--limit N] (full archived Resend reply bodies for a contact)\",\"list\":\"list [--stage X] [--limit N] [--offset N] (paginated; response has total/returned/offset/limit so you know if there's more to page through)\",\"due\":\"due (next steps due today/overdue)\",\"pipeline\":\"pipeline (counts by stage)\",\"ingest\":\"ingest '<json>' | ingest - (bulk from grepapi leads; - reads JSON from stdin for large batches, argv has an OS length limit)\",\"queue\":\"queue <contact> <email|phone> [--subject --body] (stage one outreach)\",\"queue-bulk\":\"queue-bulk '<json [{contact,channel,subject,body}]>' | queue-bulk - (load a campaign; - reads JSON from stdin for large batches)\",\"campaign\":\"campaign [--channel email|phone] [--status queued|sent] (the staged campaign as JSON)\",\"followups\":\"followups [--days 3 --max-touches 3 --limit 200] [--queue --subject S --body B] (who is due a bump; --queue stages wave 2, {{name}}/{{company}} substituted)\",\"sent\":\"sent <outreach-id> (mark sent + log touch + advance stage)\",\"send\":\"send [--limit N] [--dry-run] (drip-send queued EMAIL outreach via SMTP; needs SMTP_* env; suppression + footer + stage advance; --dry-run previews with no creds/network/DB writes)\",\"call\":\"call [--limit N] [--dry-run] (drip-dispatch queued PHONE outreach as AI cold-calls via Bland; needs BLAND_API_KEY; outcomes return via serve POST /bland; --dry-run previews with no key/network/DB writes)\",\"suppress\":\"suppress <email|phone> [reason] (never contact again; alias unsub/dnc; undoable)\",\"undo\":\"undo [--n N] (revert the last N stage/next/sent/suppress/merge operations, LIFO; send/call are NOT undoable — an email/call already left)\",\"dedup\":\"dedup [--limit N] (read-only preview of likely-duplicate contacts by same_email/same_phone/same_name_company); dedup --auto [--limit N] (EXECUTES same_email/same_phone merges to convergence — the exact-identity rules only; same_name_company always stays review-only; undoable)\",\"merge\":\"merge <primary> <dupe> (combine dupe into primary — fields, events, outreach — then delete dupe; undoable)\",\"serve\":\"serve [port] (webhook sink: POST /resend email events + POST /bland call outcomes -> the CRM; bounces/complaints auto-suppress)\",\"version\":\"version (the installed release)\",\"update\":\"update (self-update to the latest release)\"}}")
+    say("{\"ok\":true,\"name\":\"crm-cli\",\"version\":\"" + version_str() + "\",\"tagline\":\"the agent-first CRM — sink for the outreach machine\",\"db\":\"$CRM_DB, else --workspace/$CRM_WORKSPACE (~/.crmd/workspaces/<slug>.db), else ~/.crm-cli.db\",\"commands\":{\"workspace\":\"workspace list | workspace create <slug> (multiple isolated DBs — one per project/client; pass --workspace <slug> on any other command to use one)\",\"add\":\"add <name> [--company --email --phone --source --stage]\",\"log\":\"log <contact> <channel> <summary> [--ref --direction]\",\"stage\":\"stage <contact> <new|contacted|replied|meeting|deal|won|lost>\",\"next\":\"next <contact> <action> [--due YYYY-MM-DD|+N days]\",\"show\":\"show <contact>\",\"inbound\":\"inbound <contact> [--limit N] (full archived Resend reply bodies for a contact)\",\"list\":\"list [--stage X] [--limit N] [--offset N] (paginated; response has total/returned/offset/limit so you know if there's more to page through)\",\"due\":\"due (next steps due today/overdue)\",\"pipeline\":\"pipeline (counts by stage)\",\"ingest\":\"ingest '<json>' | ingest - (bulk from grepapi leads; - reads JSON from stdin for large batches, argv has an OS length limit)\",\"queue\":\"queue <contact> <email|phone> [--subject --body] (stage one outreach)\",\"queue-bulk\":\"queue-bulk '<json [{contact,channel,subject,body}]>' | queue-bulk - (load a campaign; - reads JSON from stdin for large batches)\",\"campaign\":\"campaign [--channel email|phone] [--status queued|sent] (the staged campaign as JSON)\",\"followups\":\"followups [--days 3 --max-touches 3 --limit 200] [--queue --subject S --body B] (who is due a bump; --queue stages wave 2, {{name}}/{{company}} substituted)\",\"sent\":\"sent <outreach-id> (mark sent + log touch + advance stage)\",\"send\":\"send [--limit N] [--dry-run] (drip-send queued EMAIL outreach via SMTP; needs SMTP_* env; suppression + footer + stage advance; --dry-run previews with no creds/network/DB writes)\",\"call\":\"call [--limit N] [--dry-run] (drip-dispatch queued PHONE outreach as AI cold-calls via Bland; needs BLAND_API_KEY; outcomes return via serve POST /bland; --dry-run previews with no key/network/DB writes)\",\"suppress\":\"suppress <email|phone> [reason] (never contact again; alias unsub/dnc; undoable)\",\"undo\":\"undo [--n N] (revert the last N stage/next/sent/suppress/merge operations, LIFO; send/call are NOT undoable — an email/call already left)\",\"dedup\":\"dedup [--limit N] (read-only preview of likely-duplicate contacts by same_email/same_phone/same_name_company); dedup --auto [--limit N] (EXECUTES same_email/same_phone merges to convergence — the exact-identity rules only; same_name_company always stays review-only; undoable)\",\"merge\":\"merge <primary> <dupe> (combine dupe into primary — fields, events, outreach — then delete dupe; undoable)\",\"cleanup\":\"cleanup [--dry-run] [--days N] (purge old audit/events/inbound_mail/outreach; stage-aware — active pipeline is never purged; suppress+contacts always kept; per-table env CRM_AUDIT_DAYS/CRM_EVENT_DAYS/CRM_INBOUND_DAYS/CRM_OUTREACH_DAYS, global fallback CRM_RETENTION_DAYS=365)\",\"serve\":\"serve [port] (webhook sink: POST /resend email events + POST /bland call outcomes -> the CRM; bounces/complaints auto-suppress)\",\"version\":\"version (the installed release)\",\"update\":\"update (self-update to the latest release)\"}}")
 }
 
 // crm queue <contact> <channel> [--subject X --body X]  -> stage one outreach message.
@@ -1590,6 +1662,7 @@ func main() {
     if cmd == "undo" { cmd_undo(db, a); return }
     if cmd == "dedup" { cmd_dedup(db, a); return }
     if cmd == "merge" { cmd_merge(db, a); return }
+    if cmd == "cleanup" { cmd_cleanup(db, a); return }
     sqlite_close(db)
     hint := ""
     if cmd == "--workspace" { hint = " (--workspace goes AFTER the subcommand, like every other flag: crm add ... --workspace acme, not crm --workspace acme add ...)" }
