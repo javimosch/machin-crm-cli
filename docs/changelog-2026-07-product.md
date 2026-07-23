@@ -78,7 +78,43 @@
             </div>
             <div>
               <h3 class="text-xl font-semibold text-white mb-2">A real test suite, and a release gate</h3>
-              <p class="text-white/40 leading-relaxed">100 automated checks (unit + integration) now guard every command's business rules. Releases run through a gate that refuses to ship if the suite is red.</p>
+              <p class="text-white/40 leading-relaxed">149 automated checks (unit + integration) now guard every command's business rules. Releases run through a gate that refuses to ship if the suite is red.</p>
+            </div>
+          </div>
+        </div>
+
+        <div class="feature-card rounded-xl p-6">
+          <div class="flex items-start gap-4">
+            <div class="w-12 h-12 rounded-lg bg-indigo-500/10 flex items-center justify-center flex-shrink-0">
+              <span class="text-2xl">🗂️</span>
+            </div>
+            <div>
+              <h3 class="text-xl font-semibold text-white mb-2">Workspaces — multiple isolated CRMs, one binary</h3>
+              <p class="text-white/40 leading-relaxed"><code>crm --workspace &lt;slug&gt;</code> gives each project or client its own SQLite DB. The <code>/sink</code> webhook accepts a <code>workspace</code> field so outreach drivers route touches to the right DB automatically. One binary, zero config files.</p>
+            </div>
+          </div>
+        </div>
+
+        <div class="feature-card rounded-xl p-6">
+          <div class="flex items-start gap-4">
+            <div class="w-12 h-12 rounded-lg bg-rose-500/10 flex items-center justify-center flex-shrink-0">
+              <span class="text-2xl">📬</span>
+            </div>
+            <div>
+              <h3 class="text-xl font-semibold text-white mb-2">Inbound reply archive — <code>crm inbound</code></h3>
+              <p class="text-white/40 leading-relaxed">Full Resend reply bodies are now persisted in the CRM's <code>inbound_mail</code> table, keyed by <code>resend_id</code> for idempotency. Resend keeps them 30 days; the CRM keeps them indefinitely. Read them back with <code>crm inbound &lt;contact&gt;</code>.</p>
+            </div>
+          </div>
+        </div>
+
+        <div class="feature-card rounded-xl p-6">
+          <div class="flex items-start gap-4">
+            <div class="w-12 h-12 rounded-lg bg-lime-500/10 flex items-center justify-center flex-shrink-0">
+              <span class="text-2xl">🧹</span>
+            </div>
+            <div>
+              <h3 class="text-xl font-semibold text-white mb-2">Retention — <code>crm cleanup</code></h3>
+              <p class="text-white/40 leading-relaxed">Stage-aware retention with <code>--dry-run</code>: purges old <code>audit</code>, <code>events</code>, <code>inbound_mail</code>, and <code>outreach</code> rows, but never touches active-pipeline contacts or the suppress list. Per-table env knobs with a global fallback.</p>
             </div>
           </div>
         </div>
