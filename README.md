@@ -46,7 +46,7 @@ Hosted, always-on version (no server to run): **[crmd.intrane.fr](https://crmd.i
 **Docs:** [Quickstart](docs/quickstart.md) · [Commands reference](docs/commands.md) ·
 [The outbound loop](docs/outbound-loop.md) · [Safety rails](docs/safety-rails.md) ·
 [Entity resolution](docs/entity-resolution.md) · [Workspaces](docs/workspaces.md) · [Architecture](docs/architecture.md) ·
-[docs index](docs/README.md) · also live at **[javimosch.github.io/machin-crm-cli](https://javimosch.github.io/machin-crm-cli/)**
+[Use cases](docs/use-cases.md) · [docs index](docs/README.md) · also live at **[javimosch.github.io/machin-crm-cli](https://javimosch.github.io/machin-crm-cli/)**
 (changelog + nav; the `.md` links above render best on GitHub itself)
 
 ## Build from source
