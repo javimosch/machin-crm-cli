@@ -9,6 +9,7 @@ Technical, human-facing docs for **crm-cli** — the agent-first CRM. If you're 
 - **[Entity resolution](entity-resolution.md)** — finding and merging duplicate contacts, including the automated loop.
 - **[Workspaces](workspaces.md)** — running multiple isolated CRMs (one per client, one per micro-SaaS) from a single binary.
 - **[Architecture](architecture.md)** — the schema, the audit trail, and the design decisions behind them, for anyone extending or self-hosting this.
+- **[Use cases](use-cases.md)** — real-world crm-cli patterns beyond cold email, including product distribution channels tracked as synthetic contacts.
 - **[Changelog](changelog.html)** — what shipped, month by month.
 
 ## The 30-second pitch
