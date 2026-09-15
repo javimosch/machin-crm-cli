@@ -16,6 +16,13 @@ type Contact struct {
     next_due string
     created int
     updated int
+    // Not a column. `crm ingest` accepts a snippet describing the lead -- every
+    // lead source produces one -- and it used to vanish at parse time because
+    // this struct had nowhere to put it. Downstream that mattered: a screening
+    // agent judging a prospect on a name and an email domain cannot identify
+    // anyone, so it rejects everything. Carried here so ingest can file it as a
+    // note on the contact's timeline.
+    snippet string
 }
 
 type Event struct {
@@ -299,15 +306,26 @@ func cmd_add(db, a) {
 
 // crm log <contact> <channel> <summary> [--ref <id>] [--direction in|out]
 func cmd_log(db, a) {
-    if len(a) < 5 { die(80, "usage: crm log <contact> <channel> <summary> [--ref X] [--direction in|out]") }
+    if len(a) < 5 { die(80, "usage: crm log <contact> <channel> <summary> [--ref X] [--direction in|out]  (channel 'note' or 'research' records without advancing the stage)") }
     cid := resolve(db, a[2])
     if cid == "" { die(90, "no contact matching: " + a[2]) }
     ref := flagv(a, "--ref", "")
-    dir := flagv(a, "--direction", "out")
+    // A note is research about a contact, not a message to them. Logging one
+    // used to default to direction "out" and advance new -> contacted, so
+    // attaching a description to forty fresh prospects marked all forty as
+    // contacted and invented forty outbound events -- which an outreach audit
+    // then counts as mail that was never sent.
+    isnote := 0
+    if a[3] == "note" || a[3] == "research" { isnote = 1 }
+    defdir := "out"
+    if isnote == 1 { defdir = "note" }
+    dir := flagv(a, "--direction", defdir)
     eid := nid()
     sqlite_exec(db, "INSERT INTO events(id,contact_id,channel,direction,summary,ref,ts) VALUES(?,?,?,?,?,?,?)", []string{eid, cid, a[3], dir, a[4], ref, str(now())})
     sqlite_exec(db, "UPDATE contacts SET updated=? WHERE id=?", []string{str(now()), cid})
-    sqlite_exec(db, "UPDATE contacts SET stage='contacted' WHERE id=? AND stage='new'", []string{cid})
+    if isnote == 0 {
+        sqlite_exec(db, "UPDATE contacts SET stage='contacted' WHERE id=? AND stage='new'", []string{cid})
+    }
     sqlite_close(db)
     say("{\"ok\":true,\"event\":\"" + eid + "\",\"contact\":\"" + cid + "\",\"channel\":\"" + esc(a[3]) + "\"}")
 }
@@ -489,7 +507,7 @@ func json_arg(a) (payload) {
 // when present. `-` reads the JSON from stdin instead of argv — use for large batches (see
 // json_arg).
 func cmd_ingest(db, a) {
-    if len(a) < 3 { die(80, "usage: crm ingest '<json array of {name,company,email,phone,source,stage}>' | crm ingest -  (reads JSON from stdin)") }
+    if len(a) < 3 { die(80, "usage: crm ingest '<json array of {name,company,email,phone,source,stage,snippet}>' | crm ingest -  (reads JSON from stdin; snippet is filed as a note)") }
     items := parse(json_arg(a), []Contact{})
     n := now()
     added := 0
@@ -505,8 +523,15 @@ func cmd_ingest(db, a) {
             if len(cs) > 0 { id = cs[0].id }
         }
         if id == "" {
-            sqlite_exec(db, "INSERT INTO contacts(id,name,company,email,phone,source,stage,created,updated) VALUES(?,?,?,?,?,?,?,?,?)", []string{nid(), it.name, it.company, it.email, it.phone, it.source, st, str(n), str(n)})
+            id = nid()
+            sqlite_exec(db, "INSERT INTO contacts(id,name,company,email,phone,source,stage,created,updated) VALUES(?,?,?,?,?,?,?,?,?)", []string{id, it.name, it.company, it.email, it.phone, it.source, st, str(n), str(n)})
             added = added + 1
+        }
+        // Keep what the source said about them. direction "note" rather than
+        // "in" or "out": nobody has been contacted, and an outbound audit that
+        // counts direction='out' must not find research here.
+        if it.snippet != "" && id != "" {
+            sqlite_exec(db, "INSERT INTO events(id,contact_id,channel,direction,summary,ref,ts) VALUES(?,?,?,?,?,?,?)", []string{nid(), id, "note", "note", it.snippet, "ingest", str(n)})
         }
         i = i + 1
     }
