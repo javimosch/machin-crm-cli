@@ -901,9 +901,15 @@ func cmd_queue(db, a) {
     ch := a[3]
     subj := flagv(a, "--subject", "")
     body := flagv(a, "--body", "")
-    sqlite_exec(db, "INSERT INTO outreach(id,contact_id,channel,subject,body,status,created) VALUES(?,?,?,?,?, 'queued', ?)", []string{nid(), cid, ch, subj, body, str(now())})
+    // Return the row id. Without it a caller can stage a message and then have
+    // no way to name the one it staged -- it has to ask `send` for "the oldest
+    // queued", which is a different row whenever an earlier run left one behind.
+    // `crm queue` then `crm send --id <that id>` is the only pairing that
+    // guarantees the message you staged is the message that goes.
+    oid := nid()
+    sqlite_exec(db, "INSERT INTO outreach(id,contact_id,channel,subject,body,status,created) VALUES(?,?,?,?,?, 'queued', ?)", []string{oid, cid, ch, subj, body, str(now())})
     sqlite_close(db)
-    say("{\"ok\":true,\"queued\":1,\"channel\":\"" + esc(ch) + "\"}")
+    say("{\"ok\":true,\"queued\":1,\"id\":\"" + esc(oid) + "\",\"channel\":\"" + esc(ch) + "\"}")
 }
 
 // crm queue-bulk '<json array of {contact,channel,subject,body}>' | crm queue-bulk -  -> load
@@ -1072,6 +1078,11 @@ func cmd_sent(db, a) {
 }
 
 // Sendrow is a queued email outreach joined with its recipient, for cmd_send.
+type Recentrow struct {
+    email string
+    last_sent int
+}
+
 type Sendrow struct {
     oid string
     cid string
@@ -1117,16 +1128,79 @@ func suppress_set(db) (set) {
     }
 }
 
-// crm send [--limit N]  -> drip-send QUEUED email outreach via SMTP (Resend/any relay).
+// recent_send_set — every address sent to inside the window, as map[email]last_sent.
+// One grouped query, for the same reason suppress_set exists: a SELECT per row
+// measured at 3.60 minutes for 8,053 items and contributed to a disk-I/O incident
+// under load. Membership is checked in memory.
+func recent_send_set(db, window) (set) {
+    set = make(map[string]int)
+    cutoff := now() - window
+    rows := sqlite_query(db, "SELECT lower(c.email) AS email, MAX(o.sent_at) AS last_sent FROM outreach o JOIN contacts c ON c.id=o.contact_id WHERE o.status='sent' AND o.sent_at > ? GROUP BY lower(c.email)", []string{str(cutoff)})
+    all := parse(rows, []Recentrow{})
+    i := 0
+    for i < len(all) {
+        set[all[i].email] = all[i].last_sent
+        i = i + 1
+    }
+}
+
+// crm send [--limit N] [--to <email>|--id <outreach-id>] [--force] [--min-interval-hours N]
+//   -> drip-send QUEUED email outreach via SMTP (Resend/any relay).
 // Suppression-checked, unsubscribe footer, polite 2s drip. Marks each sent|error, logs the
 // touch, advances the contact stage. Phone outreach is exported (campaign --channel phone
 // --jsonl) to bland-cli, not sent here. Config: SMTP_HOST SMTP_PORT SMTP_FROM SMTP_USER
 // SMTP_PASS SMTP_TLS (point at smtp.resend.com:587, user 'resend', pass = API key).
 func cmd_send(db, a) {
     limit := flagv(a, "--limit", "20")
-    rows := sqlite_query(db, "SELECT o.id AS oid, o.contact_id AS cid, c.email AS email, o.subject AS subject, o.body AS body FROM outreach o JOIN contacts c ON c.id=o.contact_id WHERE o.status='queued' AND o.channel='email' AND c.email!='' ORDER BY o.created LIMIT " + limit, []string{})
+    // The limit is interpolated into the SQL, so it has to be proven numeric
+    // rather than trusted. Re-emitting the parsed integer is what makes that
+    // true -- checking and then interpolating the original string would not.
+    lim := parse_int(limit)
+    if lim < 1 || str(lim) != limit {
+        die(80, "--limit must be a positive whole number, got \"" + limit + "\"")
+    }
+
+    // Targeting. Without it `send` takes the oldest queued rows and a caller has
+    // no way to say WHICH message it meant -- so a row left behind by an earlier
+    // half-failed run is what goes out instead, to whoever that row was for.
+    // That is not theoretical: it put a second copy of one cold email in a
+    // prospect's inbox while the intended recipient got nothing, and the caller
+    // was told it had succeeded.
+    want_to := to_lower(flagv(a, "--to", ""))
+    want_id := flagv(a, "--id", "")
+
+    q := "SELECT o.id AS oid, o.contact_id AS cid, c.email AS email, o.subject AS subject, o.body AS body FROM outreach o JOIN contacts c ON c.id=o.contact_id WHERE o.status='queued' AND o.channel='email' AND c.email!=''"
+    qp := []string{}
+    if want_id != "" { q = q + " AND o.id=?"; qp = append(qp, want_id) }
+    if want_to != "" { q = q + " AND lower(c.email)=?"; qp = append(qp, want_to) }
+    q = q + " ORDER BY o.created LIMIT " + str(lim)
+
+    rows := sqlite_query(db, q, qp)
     todo := parse(rows, []Sendrow{})
+
+    // Asking for a specific message and getting none is an error, not an empty
+    // success. `{"ok":true,"sent":0}` is exactly the answer that let a wrong
+    // send pass for a right one.
+    if len(todo) == 0 {
+        if want_id != "" || want_to != "" {
+            target := want_id
+            if target == "" { target = want_to }
+            sqlite_close(db)
+            die(90, "no queued email matching " + target)
+        }
+    }
+
     suppressed := suppress_set(db)
+
+    // Recency failsafe. Every other guard against contacting someone twice --
+    // the fleet's per-target cooldown, its approval step -- sits upstream of
+    // this command, so running `crm send` by hand walks straight past all of
+    // them. This is the last gate, and the one every caller shares.
+    force := has_flag(a, "--force")
+    interval_h := parse_int(flagv(a, "--min-interval-hours", "24"))
+    if interval_h < 0 { die(80, "--min-interval-hours cannot be negative") }
+    recent := make(map[string]int)
+    if interval_h > 0 { recent = recent_send_set(db, interval_h * 3600) }
 
     // --dry-run: compose the preview (incl. the suppression check) without SMTP creds, a
     // network call, or touching the DB — nothing here can send an email.
@@ -1138,7 +1212,15 @@ func cmd_send(db, a) {
         for i < len(todo) {
             m := todo[i]
             action := "send"
-            if has(suppressed, to_lower(m.email)) { action = "skip_suppressed"; skip = skip + 1 } else { would = would + 1 }
+            if has(suppressed, to_lower(m.email)) {
+                action = "skip_suppressed"; skip = skip + 1
+            } else {
+                if has(recent, to_lower(m.email)) && force == 0 {
+                    action = "skip_recent"; skip = skip + 1
+                } else {
+                    would = would + 1
+                }
+            }
             if i > 0 { preview = preview + "," }
             preview = preview + "{\"to\":\"" + esc(m.email) + "\",\"subject\":\"" + esc(m.subject) + "\",\"action\":\"" + action + "\"}"
             i = i + 1
@@ -1162,6 +1244,7 @@ func cmd_send(db, a) {
     sent := 0
     failed := 0
     supp := 0
+    recent_skipped := 0
     i := 0
     for i < len(todo) {
         m := todo[i]
@@ -1171,6 +1254,24 @@ func cmd_send(db, a) {
             supp = supp + 1
             i = i + 1
             continue
+        }
+        if has(recent, addr) && force == 0 {
+            // Held, not left queued. A skipped row that stays 'queued' sits at
+            // the head of the FIFO and is the first thing the next run picks up
+            // -- which is how the duplicate happened in the first place. Move it
+            // out of the queue and say why, so it can be requeued deliberately.
+            sqlite_exec(db, "UPDATE outreach SET status='held_recent', error=? WHERE id=?",
+                []string{"already emailed within " + str(interval_h) + "h; re-queue or use --force", m.oid})
+            write(2, "{\"warn\":\"skipped_recent\",\"to\":" + json(m.email) + ",\"within_hours\":" + str(interval_h) + "}\n")
+            recent_skipped = recent_skipped + 1
+            i = i + 1
+            continue
+        }
+        if has(recent, addr) && force == 1 {
+            // Forcing is legitimate, but it must leave a trace. A duplicate that
+            // went out on purpose and one that went out by accident look
+            // identical in an inbox.
+            write(2, "{\"warn\":\"forced_duplicate\",\"to\":" + json(m.email) + "}\n")
         }
         ok, errmsg := smtp_send(host, port, from, m.email, m.subject, m.body + mail_footer(), env("SMTP_USER"), env("SMTP_PASS"), use_tls)
         n := now()
@@ -1191,7 +1292,14 @@ func cmd_send(db, a) {
     left := sqlite_query(db, "SELECT COUNT(*) AS n FROM outreach WHERE status='queued' AND channel='email'", []string{})
     lv, _ := json_get(left, "[0].n")
     sqlite_close(db)
-    say("{\"ok\":true,\"sent\":" + str(sent) + ",\"failed\":" + str(failed) + ",\"suppressed\":" + str(supp) + ",\"still_queued\":" + lv + "}")
+    say("{\"ok\":true,\"sent\":" + str(sent) + ",\"failed\":" + str(failed) + ",\"suppressed\":" + str(supp) + ",\"skipped_recent\":" + str(recent_skipped) + ",\"still_queued\":" + lv + "}")
+    // Nothing sent BECAUSE of the failsafe must not exit 0. A caller that checks
+    // only the exit code, or only "ok":true, would otherwise read a blocked
+    // batch as a delivered one -- the precise mistake that hid a misdirected
+    // send until it was checked against the provider's own records.
+    if sent == 0 && recent_skipped > 0 {
+        exit(91)
+    }
 }
 
 // crm call [--limit N]  -> drip-dispatch QUEUED phone outreach as AI cold-calls via Bland

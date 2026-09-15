@@ -470,5 +470,49 @@ if [ "$RSFAILN" -gt 0 ]; then grep '^RSFAIL' /tmp/rs-subshell-$$.log; fi
 P=$((P + RSPASS)); F=$((F + RSFAILN))
 rm -f /tmp/rs-subshell-$$.log
 
+# --- send: targeting, and the repeat-send failsafe --------------------------
+# Both exist because of a real incident: `send` took the OLDEST queued row, a
+# stale row from a half-failed run was at the head, and a second copy of one
+# cold email went to a prospect while the intended recipient got nothing --
+# reported as a success, because the caller could only see "ok":true.
+$CRM add SendA --email sa@x.com >/dev/null
+$CRM add SendB --email sb@x.com >/dev/null
+$CRM queue sa@x.com email --subject "for A" --body x >/dev/null
+$CRM queue sb@x.com email --subject "for B" --body y >/dev/null
+
+r=$($CRM send --to sb@x.com --dry-run)
+ok "send --to picks that address, not the oldest" sb@x.com "$(jq -r '.preview[0].to' <<<"$r")"
+ok "  ...and only that one"                       1        "$(jq -r '.preview|length' <<<"$r")"
+OID=$($CRM queue sb@x.com email --subject "for B by id" --body y2 | jq -r .id)
+okre "queue returns the row id"                   "^[0-9a-f]{16}$" "$OID"
+r=$($CRM send --id "$OID" --dry-run)
+ok "send --id picks that row"                     sb@x.com "$(jq -r '.preview[0].to' <<<"$r")"
+
+$CRM send --to nosuch@x.com --dry-run >/dev/null 2>&1
+ok "send --to with no match exits 90, not ok:true" 90 "$?"
+
+$CRM send --limit "1; DROP TABLE contacts" --dry-run >/dev/null 2>&1
+ok "send rejects a non-numeric --limit"            80 "$?"
+okre "  ...and the contacts table survived"        "^[0-9]+$" "$(q "SELECT COUNT(*) FROM contacts")"
+
+# A was emailed an hour ago; queue a second message to the same address.
+q "UPDATE outreach SET status='sent', sent_at=strftime('%s','now')-3600 WHERE contact_id=(SELECT id FROM contacts WHERE email='sa@x.com')"
+$CRM queue sa@x.com email --subject "for A again" --body z >/dev/null
+r=$($CRM send --to sa@x.com --dry-run)
+ok "repeat inside the window is flagged"     skip_recent "$(jq -r '.preview[0].action' <<<"$r")"
+r=$(SMTP_HOST=invalid.example SMTP_FROM=x@y.z $CRM send --to sa@x.com 2>/dev/null); code=$?
+ok "  ...and is not sent"                    0  "$(jq -r .sent <<<"$r")"
+ok "  ...counted as skipped_recent"          1  "$(jq -r .skipped_recent <<<"$r")"
+ok "  ...exits 91 so a caller notices"       91 "$code"
+ok "  ...held, NOT left queued to block the FIFO" held_recent    "$(q "SELECT o.status FROM outreach o JOIN contacts c ON c.id=o.contact_id WHERE c.email='sa@x.com' AND o.status!='sent'")"
+
+q "UPDATE outreach SET status='queued', error='' WHERE status='held_recent'"
+r=$(SMTP_HOST=invalid.example SMTP_FROM=x@y.z $CRM send --to sa@x.com --force 2>&1)
+okre "--force gets past the failsafe and says so" "forced_duplicate" "$r"
+
+q "UPDATE outreach SET status='queued', error='' WHERE status IN ('held_recent','error')"
+r=$($CRM send --to sa@x.com --min-interval-hours 0 --dry-run)
+ok "--min-interval-hours 0 disables the guard" send "$(jq -r '.preview[0].action' <<<"$r")"
+
 echo "== integration: $P passed, $F failed =="
 [ "$F" -eq 0 ]
